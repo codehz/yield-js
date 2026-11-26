@@ -105,12 +105,12 @@ mod strategy_fixture {
         }
     }
 
-    pub(super) fn make_host(labels: &Rc<LabelService>) -> Host {
+    pub(super) fn make_host(labels: &Rc<LabelService>) -> Host<impl yield_vm::PlatformServices> {
         host! {
             dts: "../dts/ops.d.ts",
             modules: [Ops],
             services: {
-                Rc<dyn yield_vm::Diagnostics> => Rc::new(UnexpectedUncaught),
+                diagnostics: UnexpectedUncaught,
                 Rc<LabelService> => Rc::clone(labels),
             },
         }
@@ -201,7 +201,20 @@ fn restored_signal_cancels_original_operation_and_rejects_stale_delivery() {
     let mut restored = Vm::restore(
         image,
         build,
-        restored_host(),
+        // The destination has a different concrete platform but identical host bindings.
+        restored_host().with_platform(yield_vm::Platform::<
+            yield_vm::Absent,
+            yield_vm::Absent,
+            UnexpectedUncaught,
+            yield_vm::Absent,
+            yield_vm::Absent,
+            yield_vm::Absent,
+            yield_vm::host::SystemTimeService,
+        > {
+            diagnostics: Some(UnexpectedUncaught),
+            time: Some(yield_vm::host::SystemTimeService::new("Etc/UTC")),
+            ..Default::default()
+        }),
         RestoreOptions {
             validation: SnapshotValidation::Full,
             ..Default::default()
@@ -1050,7 +1063,9 @@ fn linking_node_class_requires_factory_service() {
 
     let mut deps = abi::ModuleDependencies::default();
     deps.class::<yield_harness::Node>();
-    let error = abi::link([], deps, abi::ServiceStorage::default()).expect_err("missing factory");
+    let platform: yield_vm::Platform = Default::default();
+    let error =
+        abi::link([], deps, abi::ServiceStorage::default(), platform).expect_err("missing factory");
     assert!(
         error.contains("host class \"Node\": missing host service")
             && error.contains("NodeFactory"),
@@ -1065,7 +1080,8 @@ fn linking_harness_operations_requires_driver_services() {
     fn missing_service<O: OperationDriver>(operation: &str, service: &str) {
         let mut deps = abi::ModuleDependencies::default();
         deps.operation::<O>();
-        let error = abi::link([], deps, abi::ServiceStorage::default())
+        let platform: yield_vm::Platform = Default::default();
+        let error = abi::link([], deps, abi::ServiceStorage::default(), platform)
             .expect_err("missing driver service");
         assert!(
             error.contains(&format!(

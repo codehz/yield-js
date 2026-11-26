@@ -4,7 +4,7 @@ use crate::builtin::globals::Owner;
 use crate::builtin::roots::{RootKind, RootSpec};
 use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, DescriptorUpdate, Object, PlainObject, TO_STRING_TAG_SYMBOL};
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
@@ -56,35 +56,39 @@ const ROOTS: &[RootSpec] = &[
     RootSpec::new(PROTOTYPE, RootKind::Plain, Some("error.prototype")),
 ];
 
-const INTRINSICS: &[IntrinsicDef] = &[
-    IntrinsicDef::constructor_with_target(
-        CONSTRUCTOR,
-        0,
-        |vm, _, roots, _, _| vm.throw_type_error(roots, "DOMException requires new"),
-        construct,
-    ),
-    IntrinsicDef::call(NAME, 0, |vm, _, roots, _, receiver| {
-        get(vm, roots, receiver, |name, _| Value::string(name.clone()))
-    }),
-    IntrinsicDef::call(MESSAGE, 0, |vm, _, roots, _, receiver| {
-        get(vm, roots, receiver, |_, message| {
-            Value::string(message.clone())
-        })
-    }),
-    IntrinsicDef::call(CODE, 0, |vm, _, roots, _, receiver| {
-        get(vm, roots, receiver, |name, _| {
-            let code = LEGACY_CODES
-                .iter()
-                .position(|(_, legacy_name)| {
-                    legacy_name.is_some_and(|legacy_name| name == legacy_name)
-                })
-                .map_or(0, |index| index + 1);
-            Value::number(code as f64)
-        })
-    }),
-];
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    const INTRINSICS: &[IntrinsicDef<P>] = &[
+        IntrinsicDef::constructor_with_target(
+            CONSTRUCTOR,
+            0,
+            |vm, _, roots, _, _| vm.throw_type_error(roots, "DOMException requires new"),
+            construct,
+        ),
+        IntrinsicDef::call(NAME, 0, |vm, _, roots, _, receiver| {
+            get(vm, roots, receiver, |name, _| Value::string(name.clone()))
+        }),
+        IntrinsicDef::call(MESSAGE, 0, |vm, _, roots, _, receiver| {
+            get(vm, roots, receiver, |_, message| {
+                Value::string(message.clone())
+            })
+        }),
+        IntrinsicDef::call(CODE, 0, |vm, _, roots, _, receiver| {
+            get(vm, roots, receiver, |name, _| {
+                let code = LEGACY_CODES
+                    .iter()
+                    .position(|(_, legacy_name)| {
+                        legacy_name.is_some_and(|legacy_name| name == legacy_name)
+                    })
+                    .map_or(0, |index| index + 1);
+                Value::number(code as f64)
+            })
+        }),
+    ];
+}
 
-pub(crate) const OWNER: Owner = Owner::new(ROOT, ROOTS, &[INTRINSICS], Some(install));
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const OWNER: Owner<P> = Owner::new(ROOT, ROOTS, &[Self::INTRINSICS], Some(install));
+}
 
 fn install(vm: &mut VmCore, _: &Value) {
     let constructor = vm.builtins.get(ROOT);
@@ -144,9 +148,9 @@ fn get(
     vm.throw_type_error(roots, "DOMException getter called on incompatible receiver")
 }
 
-fn construct(
+fn construct<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     new_target: &Value,
@@ -197,3 +201,5 @@ impl VmCore {
         }))
     }
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

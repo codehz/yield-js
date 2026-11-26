@@ -10,7 +10,7 @@ use crate::builtin::{
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{BoxedPrimitive, Object};
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::ops;
 use crate::runtime::Invocation;
@@ -21,12 +21,12 @@ const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
 #[yield_binding_macros::builtin_global(name = "Number", root = "number", kind = "constructor")]
 pub(crate) mod members {
-    use super::{ActiveRoots, Host, Invocation, Value, VmCore, VmError};
+    use super::{ActiveRoots, Host, Invocation, PlatformServices, Value, VmCore, VmError};
 
     #[functions(isFinite: 1, isInteger: 1, isNaN: 1, isSafeInteger: 1)]
-    fn call_static(
+    fn call_static<P: PlatformServices>(
         vm: &mut VmCore,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         key: &str,
         args: &[Value],
@@ -36,9 +36,9 @@ pub(crate) mod members {
     }
 
     #[methods(toString: 1, valueOf: 0, toFixed: 1, toExponential: 1, toPrecision: 1, toLocaleString: 0)]
-    fn call_method(
+    fn call_method<P: PlatformServices>(
         vm: &mut VmCore,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         key: &str,
         receiver: &Value,
@@ -69,25 +69,29 @@ pub(crate) mod members {
 
 const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new("Number", Slot::Global, "");
 
-pub(crate) const NUMBER_INTRINSICS: &[IntrinsicDef] = &[IntrinsicDef::constructor(
-    CONSTRUCTOR,
-    1,
-    |vm, host, roots, args, _| vm.call_number(host, roots, &args),
-    |vm, host, roots, args, prototype| {
-        let result = match vm.call_number(host, roots, &args)? {
-            Invocation::Value(value) => vm.construct_object(&[value])?,
-            thrown => thrown,
-        };
-        vm.with_result_prototype(roots, result, prototype)
-    },
-)];
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const NUMBER_INTRINSICS: &[IntrinsicDef<P>] = &[IntrinsicDef::constructor(
+        CONSTRUCTOR,
+        1,
+        |vm, host, roots, args, _| vm.call_number(host, roots, &args),
+        |vm, host, roots, args, prototype| {
+            let result = match vm.call_number(host, roots, &args)? {
+                Invocation::Value(value) => vm.construct_object(&[value])?,
+                thrown => thrown,
+            };
+            vm.with_result_prototype(roots, result, prototype)
+        },
+    )];
+}
 
-pub(crate) const OWNER: Owner = Owner::new(
-    members::ROOT,
-    NUMBER_ROOTS,
-    &[NUMBER_INTRINSICS, members::INTRINSICS],
-    Some(install),
-);
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const OWNER: Owner<P> = Owner::new(
+        members::ROOT,
+        NUMBER_ROOTS,
+        &[Self::NUMBER_INTRINSICS, members::Globals::<P>::INTRINSICS],
+        Some(install),
+    );
+}
 
 pub(crate) const NUMBER_ROOTS: &[RootSpec] = &[
     RootSpec::new(
@@ -122,9 +126,9 @@ fn install(vm: &mut VmCore, _: &Value) {
 }
 
 impl VmCore {
-    fn call_number(
+    fn call_number<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -141,9 +145,9 @@ impl VmCore {
         })
     }
 
-    pub(super) fn call_number_static(
+    pub(super) fn call_number_static<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         method: &str,
         args: &[Value],
@@ -189,9 +193,9 @@ impl VmCore {
         Ok(Invocation::Value(value))
     }
 
-    fn call_number_method(
+    fn call_number_method<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         method: &str,
         receiver: &Value,
@@ -509,3 +513,5 @@ fn integer_radix(n: f64, radix: u32) -> String {
     );
     result
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

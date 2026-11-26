@@ -7,7 +7,7 @@ use crate::error::VmError;
 use crate::frame::Frame;
 use crate::gc::ActiveRoots;
 use crate::heap::{Object, object_id};
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::runtime::Settlement;
 use crate::value::Value;
 use crate::vm::VmCore;
@@ -15,9 +15,9 @@ use crate::vm::VmCore;
 use super::Step;
 
 impl VmCore {
-    pub(super) fn step_env(
+    pub(super) fn step_env<P: PlatformServices>(
         &mut self,
-        _host: &Host,
+        _host: &Host<P>,
         roots: &ActiveRoots<'_>,
         frame: &mut Frame,
         instr: &Instr,

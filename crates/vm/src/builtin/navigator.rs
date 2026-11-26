@@ -21,7 +21,9 @@ pub(crate) const ROOTS: &[RootSpec] = &[RootSpec::new(
     Some("object.prototype"),
 )];
 
-pub(crate) const OWNER: Owner = Owner::new(ROOT, ROOTS, &[], None);
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const OWNER: Owner<P> = Owner::new(ROOT, ROOTS, &[], None);
+}
 
 /// `target_os` and `target_arch` name the platform this binary was compiled
 /// for, not the host running it.
@@ -47,3 +49,5 @@ pub(crate) fn install(vm: &mut VmCore, user_agent: Option<&str>) {
             .expect("navigator attribute");
     }
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

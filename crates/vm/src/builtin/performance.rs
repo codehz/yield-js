@@ -22,69 +22,73 @@ const JSON: IntrinsicKey = IntrinsicKey::new(ROOT, Slot::Prototype, "toJSON");
 const GET_GLOBAL: IntrinsicKey = IntrinsicKey::new("globalThis", Slot::StaticGetter, INSTANCE);
 const SET_GLOBAL: IntrinsicKey = IntrinsicKey::new("globalThis", Slot::StaticSetter, INSTANCE);
 
-const MEMBERS: &[IntrinsicDef] = &[
-    IntrinsicDef::call(GET_GLOBAL, 0, |vm, _, _, _, _| {
-        Ok(Invocation::Value(Value::object(vm.builtins.get(INSTANCE))))
-    }),
-    IntrinsicDef::call(SET_GLOBAL, 1, |vm, _, roots, args, receiver| {
-        let ValueRef::Object(receiver) = receiver.view() else {
-            return vm.throw_type_error(roots, "Incompatible performance receiver");
-        };
-        let value = args.into_iter().next().unwrap_or(Value::UNDEFINED);
-        if !vm.heap.apply_descriptor(
-            receiver,
-            INSTANCE.into(),
-            DescriptorUpdate {
-                value: Some(value),
-                writable: Some(true),
-                enumerable: Some(true),
-                configurable: Some(true),
-                ..Default::default()
-            },
-        )? {
-            return vm.throw_type_error(roots, "Cannot replace performance");
-        }
-        Ok(Invocation::Value(Value::UNDEFINED))
-    }),
-    IntrinsicDef::constructor_with_target(
-        CONSTRUCTOR,
-        0,
-        |vm, _, roots, _, _| vm.throw_type_error(roots, "Illegal Performance constructor"),
-        |vm, _, roots, _, _| vm.throw_type_error(roots, "Illegal Performance constructor"),
-    ),
-    IntrinsicDef::call(NOW, 0, |vm, _, roots, _, receiver| {
-        read(vm, roots, receiver, |vm| Value::number(vm.clock.now()))
-    }),
-    IntrinsicDef::call(ORIGIN, 0, |vm, _, roots, _, receiver| {
-        read(vm, roots, receiver, |_| Value::number(0.0))
-    }),
-    IntrinsicDef::call(JSON, 0, |vm, _, roots, _, receiver| {
-        read(vm, roots, receiver, |vm| {
-            let result = vm.heap.alloc_plain();
-            define_builtin_data(
-                vm,
-                result,
-                "timeOrigin",
-                Value::number(0.0),
-                Attributes::ORDINARY,
-            );
-            Value::object(result)
-        })
-    }),
-];
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    const MEMBERS: &[IntrinsicDef<P>] = &[
+        IntrinsicDef::call(GET_GLOBAL, 0, |vm, _, _, _, _| {
+            Ok(Invocation::Value(Value::object(vm.builtins.get(INSTANCE))))
+        }),
+        IntrinsicDef::call(SET_GLOBAL, 1, |vm, _, roots, args, receiver| {
+            let ValueRef::Object(receiver) = receiver.view() else {
+                return vm.throw_type_error(roots, "Incompatible performance receiver");
+            };
+            let value = args.into_iter().next().unwrap_or(Value::UNDEFINED);
+            if !vm.heap.apply_descriptor(
+                receiver,
+                INSTANCE.into(),
+                DescriptorUpdate {
+                    value: Some(value),
+                    writable: Some(true),
+                    enumerable: Some(true),
+                    configurable: Some(true),
+                    ..Default::default()
+                },
+            )? {
+                return vm.throw_type_error(roots, "Cannot replace performance");
+            }
+            Ok(Invocation::Value(Value::UNDEFINED))
+        }),
+        IntrinsicDef::constructor_with_target(
+            CONSTRUCTOR,
+            0,
+            |vm, _, roots, _, _| vm.throw_type_error(roots, "Illegal Performance constructor"),
+            |vm, _, roots, _, _| vm.throw_type_error(roots, "Illegal Performance constructor"),
+        ),
+        IntrinsicDef::call(NOW, 0, |vm, _, roots, _, receiver| {
+            read(vm, roots, receiver, |vm| Value::number(vm.clock.now()))
+        }),
+        IntrinsicDef::call(ORIGIN, 0, |vm, _, roots, _, receiver| {
+            read(vm, roots, receiver, |_| Value::number(0.0))
+        }),
+        IntrinsicDef::call(JSON, 0, |vm, _, roots, _, receiver| {
+            read(vm, roots, receiver, |vm| {
+                let result = vm.heap.alloc_plain();
+                define_builtin_data(
+                    vm,
+                    result,
+                    "timeOrigin",
+                    Value::number(0.0),
+                    Attributes::ORDINARY,
+                );
+                Value::object(result)
+            })
+        }),
+    ];
+}
 
-pub(super) const OWNER: Owner = Owner::new(
-    ROOT,
-    &[
-        RootSpec::new(ROOT, RootKind::Native(CONSTRUCTOR), Some(TARGET_ROOT))
-            .fixed(PROTOTYPE)
-            .backlink(Some(Attributes::METHOD)),
-        RootSpec::new(PROTOTYPE, RootKind::Plain, Some(TARGET_PROTOTYPE)),
-        RootSpec::new(INSTANCE, RootKind::Performance, Some(PROTOTYPE)),
-    ],
-    &[MEMBERS],
-    Some(install),
-);
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(super) const OWNER: Owner<P> = Owner::new(
+        ROOT,
+        &[
+            RootSpec::new(ROOT, RootKind::Native(CONSTRUCTOR), Some(TARGET_ROOT))
+                .fixed(PROTOTYPE)
+                .backlink(Some(Attributes::METHOD)),
+            RootSpec::new(PROTOTYPE, RootKind::Plain, Some(TARGET_PROTOTYPE)),
+            RootSpec::new(INSTANCE, RootKind::Performance, Some(PROTOTYPE)),
+        ],
+        &[Self::MEMBERS],
+        Some(install),
+    );
+}
 
 fn install(vm: &mut VmCore, _: &Value) {
     let global = vm.builtins.get("globalThis");
@@ -128,3 +132,5 @@ fn read(
     }
     Ok(Invocation::Value(get(vm)))
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

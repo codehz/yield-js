@@ -134,7 +134,7 @@ fn render(project: Project<'_>) -> Result<HtmlDocument, String> {
         modules: [dom::DomModule],
         services: {
             Rc<RefCell<Dom>> => dom.clone(),
-            Rc<dyn Diagnostics> => diagnostics.clone(),
+            diagnostics: diagnostics.clone(),
         },
     }?;
     // Keep diagnostics outside the VM so they survive failed startup and teardown.

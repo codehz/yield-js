@@ -12,8 +12,9 @@ use yield_vm::binding::{
 use yield_vm::bytecode::Build;
 use yield_vm::host::Completion;
 use yield_vm::{
-    ConsoleEvent, ConsoleSink, CryptoService, Diagnostic, Diagnostics, GcRoots, GuestOutcome, Host,
-    HostStep, JsString, Services, SubtleCryptoService, TimerService, UserAgent, Vm, VmError,
+    Absent, ConsoleEvent, ConsoleSink, CryptoService, Diagnostic, Diagnostics, GcRoots,
+    GuestOutcome, Host, HostStep, JsString, Platform, PlatformServices, Services,
+    SubtleCryptoService, TimeService, UserAgent, Vm, VmError, fetch::FetchService,
 };
 use yield_vm::{Decode, Encode, host, host_class, host_module, methods, module_exports, operation};
 
@@ -23,6 +24,7 @@ mod subtle;
 pub mod timer;
 
 pub use case::run_case;
+pub use subtle::TestSubtleCrypto;
 pub use timer::{FakeClock, Timer};
 
 #[derive(Default)]
@@ -432,7 +434,7 @@ pub enum RejectionEvent {
 }
 
 #[derive(Default)]
-struct CapturedDiagnostics {
+pub struct CapturedDiagnostics {
     errors: RefCell<Vec<JsValue>>,
     rejections: RefCell<Vec<RejectionEvent>>,
 }
@@ -451,7 +453,7 @@ impl Diagnostics for CapturedDiagnostics {
 }
 
 #[derive(Default)]
-struct CaseRoot(RefCell<Option<yield_vm::Value>>);
+pub struct CaseRoot(RefCell<Option<yield_vm::Value>>);
 
 impl GcRoots for CaseRoot {
     fn visit(&self, visit: &mut dyn FnMut(&yield_vm::Value)) {
@@ -460,7 +462,7 @@ impl GcRoots for CaseRoot {
 }
 
 #[derive(Default)]
-struct CapturedConsole(Mutex<Vec<ConsoleEvent>>);
+pub struct CapturedConsole(Mutex<Vec<ConsoleEvent>>);
 
 impl ConsoleSink for CapturedConsole {
     fn write(&self, event: &ConsoleEvent) {
@@ -469,7 +471,8 @@ impl ConsoleSink for CapturedConsole {
 }
 
 // Test-only repeating sequence, deliberately not a cryptographic entropy source.
-struct DeterministicEntropy;
+#[derive(Clone, Copy)]
+pub struct DeterministicEntropy;
 
 impl CryptoService for DeterministicEntropy {
     fn fill_random(&self, bytes: &mut [u8]) -> Result<(), HostFault> {
@@ -480,17 +483,36 @@ impl CryptoService for DeterministicEntropy {
     }
 }
 
-pub struct TestHost {
+pub type TestPlatform<
+    F = Absent,
+    E = DeterministicEntropy,
+    T = TestTimeService,
+    S = TestSubtleCrypto,
+> = Platform<
+    Arc<CapturedConsole>,
+    E,
+    Rc<CapturedDiagnostics>,
+    F,
+    Rc<CaseRoot>,
+    S,
+    Arc<T>,
+    Arc<FakeClock>,
+>;
+
+pub type TestVm<F = Absent, E = DeterministicEntropy, T = TestTimeService, S = TestSubtleCrypto> =
+    Vm<TestPlatform<F, E, T, S>>;
+
+pub struct TestHost<F = Absent, E = DeterministicEntropy, T = TestTimeService, S = TestSubtleCrypto>
+{
     counters: Rc<Counters>,
     labels: Rc<LabelService>,
     clock: Arc<FakeClock>,
     console: Option<Arc<CapturedConsole>>,
-    time: Arc<dyn yield_vm::TimeService>,
-    test_time: Option<Arc<TestTimeService>>,
+    time: Arc<T>,
     timers: bool,
-    fetch: Option<Arc<dyn yield_vm::fetch::FetchService>>,
-    crypto: Option<Arc<dyn CryptoService>>,
-    subtle: Option<Arc<dyn SubtleCryptoService>>,
+    fetch: Option<F>,
+    crypto: Option<E>,
+    subtle: Option<S>,
     user_agent: Option<String>,
     diagnostics: Rc<CapturedDiagnostics>,
     case_result: Rc<CaseRoot>,
@@ -505,11 +527,11 @@ pub struct TestTimeService {
 }
 
 impl TestTimeService {
-    fn new(clock: Arc<FakeClock>) -> Self {
-        Self {
+    fn new(clock: Arc<FakeClock>) -> Arc<Self> {
+        Arc::new(Self {
             clock,
             zone: std::sync::RwLock::new("Etc/UTC".into()),
-        }
+        })
     }
 
     pub fn set_time_zone(&self, time_zone: impl Into<String>) {
@@ -537,134 +559,97 @@ impl TestHost {
     pub fn new() -> Self {
         Self::with_services(
             None,
-            true,
-            None,
-            true,
-            Some(Arc::new(DeterministicEntropy)),
-            Self::default_subtle_service(),
+            DeterministicEntropy,
+            TestTimeService::new,
+            TestSubtleCrypto,
         )
     }
 
     /// A host whose time service is the supplied adapter.
-    pub fn with_time_service(time: Arc<dyn yield_vm::TimeService>) -> Self {
-        Self::with_services(
-            Some(time),
-            true,
-            None,
-            true,
-            Some(Arc::new(DeterministicEntropy)),
-            Self::default_subtle_service(),
-        )
+    pub fn with_time_service<T: TimeService + 'static>(
+        time: Arc<T>,
+    ) -> TestHost<Absent, DeterministicEntropy, T> {
+        TestHost::with_services(None, DeterministicEntropy, |_| time, TestSubtleCrypto)
     }
 
     pub fn without_timer_service() -> Self {
-        Self::with_services(
-            None,
-            false,
-            None,
-            true,
-            Some(Arc::new(DeterministicEntropy)),
-            Self::default_subtle_service(),
-        )
+        Self {
+            timers: false,
+            ..Self::new()
+        }
     }
 
     pub fn without_console_service() -> Self {
-        Self::with_services(
-            None,
-            true,
-            None,
-            false,
-            Some(Arc::new(DeterministicEntropy)),
-            Self::default_subtle_service(),
-        )
+        Self {
+            console: None,
+            ..Self::new()
+        }
     }
 
     pub fn without_crypto_service() -> Self {
-        Self::with_services(None, true, None, true, None, Self::default_subtle_service())
+        Self {
+            crypto: None,
+            ..Self::new()
+        }
     }
 
-    pub fn with_crypto_service(service: Arc<dyn CryptoService>) -> Self {
-        Self::with_services(
-            None,
-            true,
-            None,
-            true,
-            Some(service),
-            Self::default_subtle_service(),
-        )
+    pub fn with_crypto_service<E: CryptoService + 'static>(
+        service: Arc<E>,
+    ) -> TestHost<Absent, Arc<E>> {
+        TestHost::with_services(None, service, TestTimeService::new, TestSubtleCrypto)
     }
 
     /// Leaves the entropy service enabled but omits the SubtleCrypto adapter.
     pub fn without_subtle_service() -> Self {
-        Self::with_services(
-            None,
-            true,
-            None,
-            true,
-            Some(Arc::new(DeterministicEntropy)),
-            None,
-        )
+        Self {
+            subtle: None,
+            ..Self::new()
+        }
     }
 
     /// Replaces the default SubtleCrypto adapter without changing entropy.
-    pub fn with_subtle_service(service: Arc<dyn SubtleCryptoService>) -> Self {
-        Self::with_services(
-            None,
-            true,
-            None,
-            true,
-            Some(Arc::new(DeterministicEntropy)),
-            Some(service),
-        )
-    }
-
-    fn default_subtle_service() -> Option<Arc<dyn SubtleCryptoService>> {
-        Some(Arc::new(subtle::TestSubtleCrypto))
+    pub fn with_subtle_service<S: SubtleCryptoService + Clone + 'static>(
+        service: S,
+    ) -> TestHost<Absent, DeterministicEntropy, TestTimeService, S> {
+        TestHost::with_services(None, DeterministicEntropy, TestTimeService::new, service)
     }
 
     /// A host that also registers an explicit Fetch adapter.
-    pub fn with_fetch_service(service: Arc<dyn yield_vm::fetch::FetchService>) -> Self {
-        Self::with_services(
-            None,
-            true,
+    pub fn with_fetch_service<F: FetchService + 'static>(service: Arc<F>) -> TestHost<Arc<F>> {
+        TestHost::with_services(
             Some(service),
-            true,
-            Some(Arc::new(DeterministicEntropy)),
-            Self::default_subtle_service(),
+            DeterministicEntropy,
+            TestTimeService::new,
+            TestSubtleCrypto,
         )
     }
+}
 
+impl<F, E, T, S> TestHost<F, E, T, S>
+where
+    F: FetchService + Clone + 'static,
+    E: CryptoService + Clone + 'static,
+    T: TimeService + 'static,
+    S: SubtleCryptoService + Clone + 'static,
+{
     fn with_services(
-        time: Option<Arc<dyn yield_vm::TimeService>>,
-        timers: bool,
-        fetch: Option<Arc<dyn yield_vm::fetch::FetchService>>,
-        capture_console: bool,
-        crypto: Option<Arc<dyn CryptoService>>,
-        subtle: Option<Arc<dyn SubtleCryptoService>>,
+        fetch: Option<F>,
+        crypto: E,
+        time: impl FnOnce(Arc<FakeClock>) -> Arc<T>,
+        subtle: S,
     ) -> Self {
-        let counters = Rc::new(Counters::default());
-        let labels = Rc::new(LabelService::default());
         let clock = Arc::new(FakeClock::default());
-        let test_time = time
-            .is_none()
-            .then(|| Arc::new(TestTimeService::new(Arc::clone(&clock))));
-        let time = test_time
-            .clone()
-            .map(|time| time as Arc<dyn yield_vm::TimeService>)
-            .or(time)
-            .expect("a time service");
-        let console = capture_console.then(|| Arc::new(CapturedConsole::default()));
+        let time = time(clock.clone());
         Self {
-            counters,
-            labels,
+            counters: Rc::default(),
+            labels: Rc::default(),
             clock,
-            console,
+            console: Some(Arc::default()),
             time,
-            test_time,
-            timers,
+            timers: true,
             fetch,
-            crypto,
-            subtle,
+            crypto: Some(crypto),
+            subtle: Some(subtle),
             user_agent: None,
             diagnostics: Rc::default(),
             case_result: Rc::default(),
@@ -674,79 +659,29 @@ impl TestHost {
     }
 
     /// Assembles a VM host that shares this controller's resource handles.
-    pub fn host(&self) -> Host {
-        macro_rules! host_with_services {
-            ($($service:ty => $value:expr),* $(,)?) => {
-                host! {
-                    dts: "../test.d.ts",
-                    modules: [TestModule],
-                    services: {
-                        Rc<Counters> => self.counters.clone(),
-                        NodeFactory => NodeFactory,
-                        Rc<LabelService> => self.labels.clone(),
-                        Arc<FakeClock> => self.clock.clone(),
-                        Arc<dyn yield_vm::TimeService> => self.time.clone(),
-                        Rc<dyn Diagnostics> => self.diagnostics.clone(),
-                        Rc<dyn GcRoots> => self.case_result.clone(),
-                        $($service => $value,)*
-                    },
-                }
-            };
+    pub fn host(&self) -> Host<TestPlatform<F, E, T, S>> {
+        let host = host! {
+            dts: "../test.d.ts",
+            modules: [TestModule],
+            services: {
+                Rc<Counters> => self.counters.clone(),
+                NodeFactory => NodeFactory,
+                Rc<LabelService> => self.labels.clone(),
+                Arc<FakeClock> => self.clock.clone(),
+            },
         }
-        macro_rules! host_with_user_agent {
-            ($($service:ty => $value:expr),* $(,)?) => {
-                match &self.user_agent {
-                    Some(agent) => host_with_services!($($service => $value,)* UserAgent => UserAgent(agent.clone())),
-                    None => host_with_services!($($service => $value,)*),
-                }
-            };
-        }
-
-        match (
-            self.timers,
-            self.console.as_ref(),
-            self.fetch.as_ref(),
-            self.crypto.as_ref(),
-            self.subtle.as_ref(),
-        ) {
-            (true, Some(console), None, Some(crypto), Some(subtle)) => host_with_user_agent!(
-                Arc<dyn TimerService> => self.clock.clone(),
-                Arc<dyn ConsoleSink> => console.clone(),
-                Arc<dyn CryptoService> => crypto.clone(),
-                Arc<dyn SubtleCryptoService> => subtle.clone(),
-            ),
-            (false, Some(console), None, Some(crypto), Some(subtle)) => host_with_user_agent!(
-                Arc<dyn ConsoleSink> => console.clone(),
-                Arc<dyn CryptoService> => crypto.clone(),
-                Arc<dyn SubtleCryptoService> => subtle.clone(),
-            ),
-            (true, None, None, Some(crypto), Some(subtle)) => host_with_user_agent!(
-                Arc<dyn TimerService> => self.clock.clone(),
-                Arc<dyn CryptoService> => crypto.clone(),
-                Arc<dyn SubtleCryptoService> => subtle.clone(),
-            ),
-            (true, Some(console), None, None, Some(subtle)) => host_with_user_agent!(
-                Arc<dyn TimerService> => self.clock.clone(),
-                Arc<dyn ConsoleSink> => console.clone(),
-                Arc<dyn SubtleCryptoService> => subtle.clone(),
-            ),
-            (true, Some(console), None, Some(crypto), None) => host_with_user_agent!(
-                Arc<dyn TimerService> => self.clock.clone(),
-                Arc<dyn ConsoleSink> => console.clone(),
-                Arc<dyn CryptoService> => crypto.clone(),
-            ),
-            (true, Some(console), Some(fetch), Some(crypto), Some(subtle)) => {
-                host_with_user_agent!(
-                    Arc<dyn TimerService> => self.clock.clone(),
-                    Arc<dyn yield_vm::fetch::FetchService> => fetch.clone(),
-                    Arc<dyn ConsoleSink> => console.clone(),
-                    Arc<dyn CryptoService> => crypto.clone(),
-                    Arc<dyn SubtleCryptoService> => subtle.clone(),
-                )
-            }
-            _ => unreachable!("invalid TestHost service configuration"),
-        }
-        .expect("test host")
+        .expect("test host");
+        host.with_platform(Platform {
+            console: self.console.clone(),
+            crypto: self.crypto.clone(),
+            diagnostics: Some(self.diagnostics.clone()),
+            fetch: self.fetch.clone(),
+            gc_roots: Some(self.case_result.clone()),
+            subtle_crypto: self.subtle.clone(),
+            time: Some(self.time.clone()),
+            timer: self.timers.then(|| self.clock.clone()),
+            user_agent: self.user_agent.clone().map(UserAgent),
+        })
     }
 
     /// Origin, referrer, partition and authorization recorded in snapshots.
@@ -797,16 +732,8 @@ impl TestHost {
     }
 
     /// The time service registered in each assembled host.
-    pub fn time_service(&self) -> &Arc<dyn yield_vm::TimeService> {
+    pub fn time_service(&self) -> &Arc<T> {
         &self.time
-    }
-
-    /// Sets the local time zone to the supplied IANA identifier. Only the
-    /// default clock-backed time service accepts zone changes.
-    pub fn set_time_zone(&mut self, time_zone: impl Into<String>) {
-        if let Some(time) = &self.test_time {
-            time.set_time_zone(time_zone);
-        }
     }
 
     /// Overrides the value exposed as `navigator.userAgent` for new VMs.
@@ -814,14 +741,14 @@ impl TestHost {
         self.user_agent = Some(user_agent.into());
     }
 
-    pub fn advance(&mut self, vm: &mut Vm, ms: u64) -> Result<(), String> {
+    pub fn advance(&mut self, vm: &mut Vm<impl PlatformServices>, ms: u64) -> Result<(), String> {
         self.clock.advance(vm, ms)
     }
 
     /// Runs a VM turn and waits for accepted SubtleCrypto work to be delivered.
     /// Other host operations remain pending until their normal delivery turns.
     /// Returns a host error if SubtleCrypto work is still pending after five seconds.
-    pub fn drain_subtle(&mut self, vm: &mut Vm) -> Result<(), VmError> {
+    pub fn drain_subtle(&mut self, vm: &mut Vm<impl PlatformServices>) -> Result<(), VmError> {
         vm.run_until_idle()?;
         let deadline = Instant::now() + Duration::from_secs(5);
         while vm.has_pending_subtle_operations() {
@@ -847,7 +774,7 @@ impl TestHost {
 
     pub fn complete(
         &mut self,
-        vm: &mut Vm,
+        vm: &mut Vm<impl PlatformServices>,
         label: &str,
         completion: Completion,
     ) -> Result<(), String> {
@@ -856,6 +783,13 @@ impl TestHost {
             .ok_or_else(|| format!("unknown operation {label:?}"))?;
         vm.complete_operation(token, completion)
             .map_err(|error| error.to_string())
+    }
+}
+
+impl<F, E, S> TestHost<F, E, TestTimeService, S> {
+    /// Sets the local time zone of the default clock-backed time service.
+    pub fn set_time_zone(&mut self, time_zone: impl Into<String>) {
+        self.time.set_time_zone(time_zone);
     }
 }
 

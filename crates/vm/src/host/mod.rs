@@ -2,16 +2,19 @@
 
 use std::any::Any;
 
-use crate::binding::{Bindings, BuiltinServices, JsValue};
+use crate::binding::{Bindings, JsValue};
+use crate::fetch::FetchService;
 use crate::value::{JsString, Value};
 
 mod console;
 mod crypto;
+mod platform;
 mod time;
 mod timer;
 
 pub use console::{ConsoleEvent, ConsoleSink};
 pub use crypto::{CryptoService, SubtleCryptoRequest, SubtleCryptoService};
+pub use platform::{Absent, Platform};
 pub use time::{DummyTimeService, SystemTimeService, TimeService};
 pub use timer::TimerService;
 
@@ -24,18 +27,51 @@ pub enum Completion {
     Rejected(JsValue),
 }
 
+/// Built-in capabilities of a host. Unconfigured slots return `None`.
+pub trait PlatformServices: 'static {
+    type Console: ConsoleSink;
+    type Crypto: CryptoService;
+    type Diagnostics: Diagnostics;
+    type Fetch: FetchService;
+    type GcRoots: GcRoots;
+    type SubtleCrypto: SubtleCryptoService + Clone;
+    type Time: TimeService;
+    type Timer: TimerService;
+
+    fn console(&self) -> Option<&Self::Console>;
+    fn crypto(&self) -> Option<&Self::Crypto>;
+    fn diagnostics(&self) -> Option<&Self::Diagnostics>;
+    fn fetch(&self) -> Option<&Self::Fetch>;
+    fn gc_roots(&self) -> Option<&Self::GcRoots>;
+    fn subtle_crypto(&self) -> Option<&Self::SubtleCrypto>;
+    fn time(&self) -> Option<&Self::Time>;
+    fn timer(&self) -> Option<&Self::Timer>;
+    fn user_agent(&self) -> Option<&UserAgent>;
+}
+
 /// The declarations and resources consumed by one VM at startup or restore.
 ///
 /// Use [`crate::host!`] to register modules and services, or `Host::default()`
 /// to run a VM with no external capabilities.
-#[derive(Debug)]
-pub struct Host {
+pub struct Host<P: PlatformServices = Platform> {
     bindings: Bindings,
+    platform: P,
 }
 
-impl Host {
-    pub(crate) fn linked(bindings: Bindings) -> Self {
-        Self { bindings }
+impl<P: PlatformServices> Host<P> {
+    pub(crate) fn linked(bindings: Bindings, platform: P) -> Self {
+        Self { bindings, platform }
+    }
+
+    /// Borrows the built-in capabilities of this host.
+    pub fn platform(&self) -> &P {
+        &self.platform
+    }
+
+    /// Reuses the linked application bindings with a different platform.
+    #[doc(hidden)]
+    pub fn with_platform<Q: PlatformServices>(self, platform: Q) -> Host<Q> {
+        Host::linked(self.bindings, platform)
     }
 
     pub(crate) fn bindings(&self) -> &Bindings {
@@ -47,15 +83,19 @@ impl Host {
     pub fn bind_service<T: Any>(&self) -> Option<&T> {
         self.bindings.bind_service::<T>()
     }
+}
 
-    pub(crate) fn builtin_services(&self) -> BuiltinServices<'_> {
-        self.bindings.builtin_services()
+impl<P: PlatformServices> std::fmt::Debug for Host<P> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Host")
+            .field("bindings", &self.bindings)
+            .finish_non_exhaustive()
     }
 }
 
 impl Default for Host {
     fn default() -> Self {
-        Self::linked(Bindings::empty())
+        Self::linked(Bindings::empty(), Platform::default())
     }
 }
 

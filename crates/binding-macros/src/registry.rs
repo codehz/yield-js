@@ -293,16 +293,53 @@ pub(super) fn service_owner(
     }
 }
 
-struct ServiceBinding {
-    ty: Type,
-    value: Expr,
+const PLATFORM_SERVICES: [&str; 9] = [
+    "console",
+    "crypto",
+    "diagnostics",
+    "fetch",
+    "gc_roots",
+    "subtle_crypto",
+    "time",
+    "timer",
+    "user_agent",
+];
+
+enum ServiceBinding {
+    Platform { name: Ident, value: Expr },
+    Custom { ty: Box<Type>, value: Expr },
 }
 
-impl Parse for ServiceBinding {
-    fn parse(input: ParseStream<'_>) -> Result<Self> {
-        let ty = input.parse()?;
+impl ServiceBinding {
+    fn parse(input: ParseStream<'_>, seen: &mut BTreeSet<String>) -> Result<Self> {
+        let ahead = input.fork();
+        if let Ok(name) = ahead.call(Ident::parse_any)
+            && ahead.peek(Token![:])
+            && !ahead.peek(Token![::])
+        {
+            let key = name.unraw().to_string();
+            if !PLATFORM_SERVICES.contains(&key.as_str()) {
+                return Err(Error::new(
+                    name.span(),
+                    format!("unknown platform service: {key}"),
+                ));
+            }
+            if !seen.insert(key.clone()) {
+                return Err(Error::new(
+                    name.span(),
+                    format!("duplicate platform service: {key}"),
+                ));
+            }
+            let name = input.call(Ident::parse_any)?;
+            input.parse::<Token![:]>()?;
+            return Ok(Self::Platform {
+                name,
+                value: input.parse()?,
+            });
+        }
+        let ty = Box::new(input.parse()?);
         input.parse::<Token![=>]>()?;
-        Ok(Self {
+        Ok(Self::Custom {
             ty,
             value: input.parse()?,
         })
@@ -312,10 +349,15 @@ impl Parse for ServiceBinding {
 fn service_bindings(input: ParseStream<'_>) -> Result<Vec<ServiceBinding>> {
     let contents;
     braced!(contents in input);
-    Ok(contents
-        .parse_terminated(ServiceBinding::parse, Token![,])?
-        .into_iter()
-        .collect())
+    let mut seen = BTreeSet::new();
+    let mut bindings = Vec::new();
+    while !contents.is_empty() {
+        bindings.push(ServiceBinding::parse(&contents, &mut seen)?);
+        if !contents.is_empty() {
+            contents.parse::<Token![,]>()?;
+        }
+    }
+    Ok(bindings)
 }
 
 struct Registry {
@@ -372,48 +414,66 @@ pub(super) fn host(input: TokenStream, origin: Option<PathBuf>) -> Result<TokenS
     } else {
         TokenStream::new()
     };
-    let storage = if services.is_empty() {
+    let mut initializers = Vec::new();
+    let mut custom_values = Vec::new();
+    let mut platform_values = BTreeMap::new();
+    for (index, binding) in services.into_iter().enumerate() {
+        let local = Ident::new(&format!("__yield_service{index}"), MacroSpan::mixed_site());
+        match binding {
+            ServiceBinding::Platform { name, value } => {
+                initializers.push(quote!(let #local = #value;));
+                platform_values.insert(name.unraw().to_string(), local);
+            }
+            ServiceBinding::Custom { ty, value } => {
+                // Coerce at the user type before inferring the layout's parameters.
+                initializers.push(quote!(let #local: #ty = #value;));
+                custom_values.push(local);
+            }
+        }
+    }
+    let platform_fields = PLATFORM_SERVICES.into_iter().map(|name| {
+        let field = Ident::new(name, MacroSpan::mixed_site());
+        let value = match platform_values.get(name) {
+            Some(local) => quote!(::core::option::Option::Some(#local)),
+            None if name == "user_agent" => quote!(::core::option::Option::None),
+            None => quote!(::core::option::Option::None::<::yield_vm::host::Absent>),
+        };
+        quote!(#field: #value)
+    });
+    let storage = if custom_values.is_empty() {
         quote!(::core::result::Result::Ok(
             ::yield_vm::__macro_support::ServiceStorage::default()
         ))
     } else {
         let generated = |prefix: &str| -> Vec<Ident> {
-            (0..services.len())
+            (0..custom_values.len())
                 .map(|index| Ident::new(&format!("{prefix}{index}"), MacroSpan::mixed_site()))
                 .collect()
         };
         let fields = generated("__s");
         let params = generated("__T");
-        let values = generated("__yield_service");
         let layout = Ident::new("__YieldServiceLayout", MacroSpan::mixed_site());
-        let types = services.iter().map(|binding| &binding.ty);
-        let expressions = services.iter().map(|binding| &binding.value);
         quote! {{
-            // Coerce at the user type, before inferring the layout's parameters.
-            // Keep all caller tokens outside the generated item's scope.
-            #(let #values: #types = #expressions;)*
-            {
-                struct #layout<#(#params),*> {
-                    #(#fields: #params),*
-                }
-                impl<#(#params: 'static),*> #layout<#(#params),*> {
-                    fn into_storage(self) -> ::core::result::Result<
-                        ::yield_vm::__macro_support::ServiceStorage,
-                        ::std::string::String,
-                    > {
-                        // SAFETY: these offsets and types describe the fields of the
-                        // same concrete layout instantiation passed to `from_layout`.
-                        unsafe {
-                            ::yield_vm::__macro_support::ServiceStorage::from_layout(self, [
-                                #(::yield_vm::__macro_support::ServiceField::of::<#params>(
-                                    ::core::mem::offset_of!(Self, #fields)
-                                )),*
-                            ])
-                        }
+            struct #layout<#(#params),*> {
+                #(#fields: #params),*
+            }
+            impl<#(#params: 'static),*> #layout<#(#params),*> {
+                fn into_storage(self) -> ::core::result::Result<
+                    ::yield_vm::__macro_support::ServiceStorage,
+                    ::std::string::String,
+                > {
+                    // SAFETY: these offsets and types describe the fields of the
+                    // same concrete layout instantiation passed to `from_layout`.
+                    unsafe {
+                        ::yield_vm::__macro_support::ServiceStorage::from_layout(self, [
+                            #(::yield_vm::__macro_support::ServiceField::of::<#params>(
+                                ::core::mem::offset_of!(Self, #fields)
+                            )),*
+                        ])
                     }
                 }
-                #layout { #(#fields: #values),* }.into_storage()
             }
+            #layout { #(#fields: #custom_values),* }.into_storage()
         }}
     };
     let mutable = (!modules.is_empty()).then(|| quote!(mut));
@@ -424,11 +484,17 @@ pub(super) fn host(input: TokenStream, origin: Option<PathBuf>) -> Result<TokenS
     Ok(quote! {
         {
             #declaration_validation
+            #(#initializers)*
             match #storage {
                 ::core::result::Result::Ok(#services_var) => {
                     let #mutable #deps = <::yield_vm::__macro_support::ModuleDependencies as ::core::default::Default>::default();
                     let #modules_var = [#(::yield_vm::__macro_support::module::<#modules>(&mut #deps)),*];
-                    ::yield_vm::__macro_support::link(#modules_var, #deps, #services_var)
+                    ::yield_vm::__macro_support::link(
+                        #modules_var,
+                        #deps,
+                        #services_var,
+                        ::yield_vm::host::Platform { #(#platform_fields),* },
+                    )
                 }
                 ::core::result::Result::Err(#error) => {
                     ::core::result::Result::Err(#error)
@@ -728,7 +794,8 @@ mod tests {
         let registry: Registry = syn::parse2(quote! {
             dts: "tests/dts/empty.d.ts",
             services: {
-                Clock => tick(),
+                api::Clock => tick(),
+                time: clock,
                 Arc<dyn TimerService> => timer,
             },
             modules: [api::V1,],
@@ -745,12 +812,16 @@ mod tests {
                 .map(|segment| &segment.ident)
                 .eq(["api", "V1"])
         );
-        let [clock, timer] = registry.services.as_slice() else {
-            panic!("expected two service bindings");
+        let [
+            ServiceBinding::Custom { ty: clock, .. },
+            ServiceBinding::Platform { name, .. },
+            ServiceBinding::Custom { ty: timer, .. },
+        ] = registry.services.as_slice()
+        else {
+            panic!("expected custom, platform, and custom bindings in source order");
         };
-        let clock = &clock.ty;
-        let timer = &timer.ty;
-        assert_eq!(quote!(#clock).to_string(), quote!(Clock).to_string());
+        assert_eq!(quote!(#clock).to_string(), quote!(api::Clock).to_string());
+        assert_eq!(name, "time");
         assert_eq!(
             quote!(#timer).to_string(),
             quote!(Arc<dyn TimerService>).to_string()
@@ -762,6 +833,35 @@ mod tests {
         for binding in [quote!(Clock tick()), quote!(Clock? => Some(17))] {
             diagnostic(host(quote!(services: { #binding })), "expected `=>`");
         }
+    }
+
+    #[test]
+    fn host_reports_unknown_and_duplicate_platform_names() {
+        diagnostic(
+            host(quote!(services: { diagnostcs: sink })),
+            "unknown platform service: diagnostcs",
+        );
+        diagnostic(
+            host(quote!(services: { diagnostics: one, r#diagnostics: two })),
+            "duplicate platform service: diagnostics",
+        );
+    }
+
+    #[test]
+    fn host_emits_named_values_and_explicit_empty_slots_without_a_layout() {
+        let expansion = host(quote!(services: { diagnostics: sink(), user_agent: agent })).unwrap();
+        syn::parse2::<Expr>(expansion.clone()).unwrap();
+        let output = expansion.to_string();
+        assert!(output.contains(&quote!(let __yield_service0 = sink();).to_string()));
+        for field in [
+            quote!(diagnostics: ::core::option::Option::Some(__yield_service0)),
+            quote!(user_agent: ::core::option::Option::Some(__yield_service1)),
+            quote!(console: ::core::option::Option::None::<::yield_vm::host::Absent>),
+        ] {
+            assert!(output.contains(&field.to_string()), "missing field {field}");
+        }
+        assert!(output.contains(&quote!(ServiceStorage::default()).to_string()));
+        assert!(!output.contains("offset_of"));
     }
 
     #[test]

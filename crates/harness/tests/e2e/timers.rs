@@ -3,8 +3,8 @@
 use yield_harness::{TestHost, build};
 use yield_vm::snapshot::DeliveryTarget;
 use yield_vm::{
-    Completion, JsValue, PromiseState, RestoreOptions, Snapshot, SnapshotValidation, Value, Vm,
-    VmError, VmOptions,
+    Completion, JsValue, PromiseState, RestoreOptions, Snapshot, SnapshotValidation, TimeService,
+    Value, Vm, VmError, VmOptions,
 };
 
 const SCHEDULE: &str = r#"
@@ -25,7 +25,7 @@ const SCHEDULE: &str = r#"
     }
 "#;
 
-fn expect_unknown(vm: &mut Vm, token: yield_vm::OperationToken) {
+fn expect_unknown(vm: &mut Vm<impl yield_vm::PlatformServices>, token: yield_vm::OperationToken) {
     assert!(matches!(
         vm.complete_operation(token, Completion::Fulfilled(JsValue::undefined())),
         Err(VmError::UnknownOperation(_))
@@ -417,14 +417,14 @@ fn consecutive_timer_awaits_restore_without_replacing_the_handle() {
     let clock = Arc::new(yield_harness::FakeClock::default());
     let make_host = || {
         yield_vm::host! {
-        dts: "../dts/chain.d.ts",
-        modules: [Chain],
-        services: {
-            std::rc::Rc<dyn yield_vm::Diagnostics> => std::rc::Rc::new(super::support::UnexpectedUncaught),
-            std::sync::Arc<yield_harness::FakeClock> => Arc::clone(&clock),
-        },
-    }
-    .unwrap()
+            dts: "../dts/chain.d.ts",
+            modules: [Chain],
+            services: {
+                diagnostics: super::support::UnexpectedUncaught,
+                std::sync::Arc<yield_harness::FakeClock> => Arc::clone(&clock),
+            },
+        }
+        .unwrap()
     };
     let build = compile_main(
         r#"

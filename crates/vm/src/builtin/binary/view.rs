@@ -11,7 +11,7 @@ use crate::gc::ActiveRoots;
 use crate::heap::{
     Attributes, DataViewObject, ElementKind, Object, TO_STRING_TAG_SYMBOL, ViewRange,
 };
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{ObjectId, Value, ValueRef};
@@ -25,39 +25,41 @@ const BYTE_OFFSET: IntrinsicKey =
 
 macro_rules! data_view_members {
     ($($get:literal => $set:literal : $kind:ident),+ $(,)?) => {
-        pub(super) const INTRINSICS: &[IntrinsicDef] = &[
-            IntrinsicDef::constructor_with_target(
-                DATA_VIEW,
-                1,
-                |vm, _, roots, _, _| vm.throw_type_error(roots, "Constructor DataView requires new"),
-                construct,
-            ),
-            IntrinsicDef::call(BUFFER, 0, |vm, _, roots, _, receiver| {
-                brand(vm, roots, receiver, |view| Value::object(view.buffer))
-            }),
-            IntrinsicDef::call(BYTE_LENGTH, 0, |vm, _, roots, _, receiver| {
-                vm.data_view_length(roots, receiver)
-            }),
-            IntrinsicDef::call(BYTE_OFFSET, 0, |vm, _, roots, _, receiver| {
-                vm.data_view_offset(roots, receiver)
-            }),
-            $(
-                IntrinsicDef::call(
-                    IntrinsicKey::new("DataView", Slot::Prototype, $get),
+        impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+            pub(super) const INTRINSICS: &[IntrinsicDef<P>] = &[
+                IntrinsicDef::constructor_with_target(
+                    DATA_VIEW,
                     1,
-                    |vm, host, roots, args, receiver| {
-                        vm.data_view_get(host, roots, receiver, &args, ElementKind::$kind)
-                    },
+                    |vm, _, roots, _, _| vm.throw_type_error(roots, "Constructor DataView requires new"),
+                    construct,
                 ),
-                IntrinsicDef::call(
-                    IntrinsicKey::new("DataView", Slot::Prototype, $set),
-                    2,
-                    |vm, host, roots, args, receiver| {
-                        vm.data_view_set(host, roots, receiver, &args, ElementKind::$kind)
-                    },
-                ),
-            )+
-        ];
+                IntrinsicDef::call(BUFFER, 0, |vm, _, roots, _, receiver| {
+                    brand(vm, roots, receiver, |view| Value::object(view.buffer))
+                }),
+                IntrinsicDef::call(BYTE_LENGTH, 0, |vm, _, roots, _, receiver| {
+                    vm.data_view_length(roots, receiver)
+                }),
+                IntrinsicDef::call(BYTE_OFFSET, 0, |vm, _, roots, _, receiver| {
+                    vm.data_view_offset(roots, receiver)
+                }),
+                $(
+                    IntrinsicDef::call(
+                        IntrinsicKey::new("DataView", Slot::Prototype, $get),
+                        1,
+                        |vm, host, roots, args, receiver| {
+                            vm.data_view_get(host, roots, receiver, &args, ElementKind::$kind)
+                        },
+                    ),
+                    IntrinsicDef::call(
+                        IntrinsicKey::new("DataView", Slot::Prototype, $set),
+                        2,
+                        |vm, host, roots, args, receiver| {
+                            vm.data_view_set(host, roots, receiver, &args, ElementKind::$kind)
+                        },
+                    ),
+                )+
+            ];
+        }
 
         /// Property installation repeats the same member list.
         fn install_elements(vm: &mut VmCore) {
@@ -116,9 +118,9 @@ fn brand(
     Ok(Invocation::Value(read(view)))
 }
 
-fn construct(
+fn construct<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     new_target: &Value,
@@ -237,9 +239,9 @@ impl VmCore {
         }
     }
 
-    fn data_view_get(
+    fn data_view_get<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         args: &[Value],
@@ -274,9 +276,9 @@ impl VmCore {
         Ok(Invocation::Value(element::decode(kind, bits)))
     }
 
-    fn data_view_set(
+    fn data_view_set<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         args: &[Value],
@@ -318,3 +320,5 @@ impl VmCore {
         Ok(Invocation::Value(Value::UNDEFINED))
     }
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

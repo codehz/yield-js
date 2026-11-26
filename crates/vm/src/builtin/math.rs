@@ -4,7 +4,7 @@ use crate::builtin::binary::element::{f16_to_f64, f64_to_f16_bits};
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::ITERATOR_SYMBOL;
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::ops::number_to_uint32;
 use crate::runtime::Invocation;
 use crate::value::{PropertyKeyRef, Value, ValueRef};
@@ -16,7 +16,9 @@ pub(crate) const RANDOM_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
 pub(crate) mod namespace {
     use std::f64::consts;
 
-    use super::{ActiveRoots, Host, Invocation, Value, ValueRef, VmCore, VmError};
+    use super::{
+        ActiveRoots, Host, Invocation, PlatformServices, Value, ValueRef, VmCore, VmError,
+    };
 
     #[constant(name = "E")]
     const E: f64 = consts::E;
@@ -36,9 +38,9 @@ pub(crate) mod namespace {
     const SQRT2: f64 = consts::SQRT_2;
 
     #[function(name = "abs", length = 1)]
-    fn abs(
+    fn abs<P: PlatformServices>(
         vm: &mut VmCore,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -60,9 +62,9 @@ pub(crate) mod namespace {
         min: 2, pow: 2, random: 0, round: 1, sign: 1, sin: 1, sinh: 1, sqrt: 1,
         sumPrecise: 1, tan: 1, tanh: 1, trunc: 1
     )]
-    fn dispatch(
+    fn dispatch<P: PlatformServices>(
         vm: &mut VmCore,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         member: &'static str,
         args: &[Value],
@@ -72,9 +74,9 @@ pub(crate) mod namespace {
 }
 
 impl VmCore {
-    fn call_math_method(
+    fn call_math_method<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         method: &str,
         args: &[Value],
@@ -200,9 +202,9 @@ impl VmCore {
         Ok(Invocation::Value(Value::number(result)))
     }
 
-    fn math_sum_precise(
+    fn math_sum_precise<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         items: &Value,
     ) -> Result<Invocation, VmError> {

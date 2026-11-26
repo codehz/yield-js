@@ -11,7 +11,7 @@ use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use crate::builtin::binary::{ARRAY_BUFFER_PROTOTYPE, MAX_BYTE_LENGTH};
 use crate::error::VmError;
 use crate::heap::{ArrayBufferObject, CryptoKeyAlgorithm, CryptoKeyUsage, Object, PlainObject};
-use crate::host::{SubtleCryptoRequest, SubtleCryptoService};
+use crate::host::{PlatformServices, SubtleCryptoRequest, SubtleCryptoService};
 use crate::runtime::Settlement;
 use crate::value::{ObjectId, Value};
 use crate::vm::VmCore;
@@ -38,7 +38,7 @@ struct Worker {
 }
 
 impl Worker {
-    fn spawn(service: Arc<dyn SubtleCryptoService>) -> std::io::Result<Self> {
+    fn spawn<S: SubtleCryptoService + Send + 'static>(service: S) -> std::io::Result<Self> {
         let (requests, incoming) = mpsc::sync_channel(MAX_PENDING);
         let (outgoing, results) = mpsc::sync_channel(MAX_PENDING);
         let closed = Arc::new(AtomicBool::new(false));
@@ -102,16 +102,16 @@ impl VmCore {
         !self.subtle_state.pending.is_empty()
     }
 
-    pub(crate) fn start_subtle_request(
+    pub(crate) fn start_subtle_request<P: PlatformServices>(
         &mut self,
-        host: &crate::host::Host,
+        host: &crate::host::Host<P>,
         promise: ObjectId,
         request: SubtleCryptoRequest,
         result: Output,
     ) -> Result<(), VmError> {
         let state = &mut self.subtle_state;
         if state.worker.is_none() {
-            let Some(service) = host.builtin_services().subtle_crypto() else {
+            let Some(service) = host.platform().subtle_crypto() else {
                 let reason = self.alloc_dom_exception(
                     "NotSupportedError".into(),
                     "SubtleCrypto service unavailable".into(),
@@ -119,7 +119,7 @@ impl VmCore {
                 self.queue_adopt(promise, Settlement::Rejected(reason));
                 return Ok(());
             };
-            state.worker = Worker::spawn(Arc::clone(service)).ok();
+            state.worker = Worker::spawn(Clone::clone(service)).ok();
         }
         if state.pending.len() < MAX_PENDING
             && let Some(worker) = &state.worker

@@ -101,14 +101,14 @@ impl DemoHost {
         })
     }
 
-    fn host(&self) -> Result<Host, String> {
+    fn host(&self) -> Result<Host<impl yield_vm::PlatformServices>, String> {
         host! {
             dts: "../demo.d.ts",
             modules: [Demo],
             services: {
                 Rc<DemoCounters> => self.counters.clone(),
                 Rc<LabelService> => self.labels.clone(),
-                Arc<dyn yield_vm::TimeService> => self.time.clone(),
+                time: self.time.clone(),
             },
         }
     }
@@ -121,7 +121,12 @@ impl DemoHost {
         self.labels.token(label)
     }
 
-    fn complete(&self, vm: &mut Vm, label: &str, value: JsValue) -> Result<(), String> {
+    fn complete(
+        &self,
+        vm: &mut Vm<impl yield_vm::PlatformServices>,
+        label: &str,
+        value: JsValue,
+    ) -> Result<(), String> {
         let token = self
             .token(label)
             .ok_or_else(|| format!("unknown operation {label:?}"))?;

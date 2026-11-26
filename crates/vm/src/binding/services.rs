@@ -2,16 +2,6 @@
 
 use std::any::{Any, TypeId, type_name};
 use std::marker::PhantomData;
-use std::rc::Rc;
-use std::sync::Arc;
-
-use crate::fetch::FetchService;
-use crate::host::{
-    ConsoleSink, CryptoService, Diagnostics, GcRoots, SubtleCryptoService, TimeService,
-    TimerService, UserAgent,
-};
-
-const MISSING: usize = usize::MAX;
 
 /// The single ordered dependency declaration for a host binding type.
 ///
@@ -143,55 +133,6 @@ pub(crate) struct ResolvedServices(Vec<usize>);
 
 impl ResolvedServices {
     pub(crate) const EMPTY: Self = Self(Vec::new());
-}
-
-// Built-in consumers have a closed, fixed set of optional offsets. Keep it
-// inline so constructing an empty Host does not allocate a scope table.
-macro_rules! builtin_services {
-    ($($name:ident: $ty:ty),* $(,)?) => {
-        pub(crate) struct BuiltinOffsets { $($name: usize),* }
-
-        impl BuiltinOffsets {
-            pub(crate) fn resolve(storage: &ServiceStorage) -> Self {
-                Self { $($name: storage.offset(TypeId::of::<$ty>()).unwrap_or(MISSING)),* }
-            }
-
-            /// # Safety
-            /// These offsets must have been resolved against `storage`.
-            pub(crate) unsafe fn bind<'a>(&'a self, storage: &'a ServiceStorage) -> BuiltinServices<'a> {
-                BuiltinServices { base: base(storage.layout.as_ref()), offsets: self }
-            }
-        }
-
-        pub(crate) struct BuiltinServices<'a> {
-            base: *const u8,
-            offsets: &'a BuiltinOffsets,
-        }
-
-        impl<'a> BuiltinServices<'a> {
-            $(pub(crate) fn $name(&self) -> Option<&'a $ty> {
-                let offset = self.offsets.$name;
-                if offset == MISSING {
-                    None
-                } else {
-                    // SAFETY: this slot was resolved for this type and layout.
-                    Some(unsafe { project(self.base, offset) })
-                }
-            })*
-        }
-    };
-}
-
-builtin_services! {
-    console: Arc<dyn ConsoleSink>,
-    crypto: Arc<dyn CryptoService>,
-    diagnostics: Rc<dyn Diagnostics>,
-    fetch: Arc<dyn FetchService>,
-    gc_roots: Rc<dyn GcRoots>,
-    subtle_crypto: Arc<dyn SubtleCryptoService>,
-    time: Arc<dyn TimeService>,
-    timer: Arc<dyn TimerService>,
-    user_agent: UserAgent,
 }
 
 /// The linked services for `Owner`. Accessors are generated next to its declaration.

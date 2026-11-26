@@ -13,7 +13,7 @@ use crate::gc::ActiveRoots;
 use crate::heap::{
     Attributes, Object, PlainObject, ReadableReaderObject, ReadableState, ReadableStreamObject,
 };
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::{Arguments, Invocation, Settlement};
 use crate::value::{ObjectId, Value, ValueRef};
@@ -26,89 +26,107 @@ const CONTROLLER_PROTO: &str = "readableStreamDefaultController.prototype";
 macro_rules! interface {
     ($owner:ident, $root:literal, $name:literal, $proto:ident, $key:ident => $ctor:expr,
         $($slot:ident $member:literal $len:literal => $call:expr),* $(,)?) => {
-        pub(in crate::builtin) const $owner: Owner = {
-            const $key: IntrinsicKey = IntrinsicKey::new($name, Slot::Global, "");
-            const MEMBERS: &[IntrinsicDef] = &[
-                $ctor,
-                $(IntrinsicDef::call(IntrinsicKey::new($name, Slot::$slot, $member), $len, $call),)*
-            ];
-            Owner::new(
-                $root,
-                &[
-                    RootSpec::new($root, RootKind::Native($key), FUNCTION_PARENT)
-                        .fixed($proto)
-                        .backlink(Some(crate::heap::Attributes::METHOD)),
-                    RootSpec::new($proto, RootKind::Plain, OBJECT_PARENT),
-                ],
-                &[MEMBERS],
-                Some(|vm, _| install(vm, $name, $root, $proto, MEMBERS)),
-            )
-        };
+        impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+            pub(in crate::builtin) const $owner: Owner<P> = {
+                const $key: IntrinsicKey = IntrinsicKey::new($name, Slot::Global, "");
+                struct LocalMembers<P>(std::marker::PhantomData<P>);
+                impl<P: crate::host::PlatformServices> LocalMembers<P> {
+                    const MEMBERS: &[IntrinsicDef<P>] = &[
+                        $ctor,
+                        $(IntrinsicDef::call(IntrinsicKey::new($name, Slot::$slot, $member), $len, $call),)*
+                    ];
+                }
+                Owner::new(
+                    $root,
+                    &[
+                        RootSpec::new($root, RootKind::Native($key), FUNCTION_PARENT)
+                            .fixed($proto)
+                            .backlink(Some(crate::heap::Attributes::METHOD)),
+                        RootSpec::new($proto, RootKind::Plain, OBJECT_PARENT),
+                    ],
+                    &[LocalMembers::<P>::MEMBERS],
+                    Some(|vm, _| install(vm, $name, $root, $proto, LocalMembers::<P>::MEMBERS)),
+                )
+            };
+        }
     };
 }
 pub(super) use interface;
 
-pub(in crate::builtin) const STREAM_OWNER: Owner = {
-    const KEY: IntrinsicKey = IntrinsicKey::new("ReadableStream", Slot::Global, "");
-    const MEMBERS: &[IntrinsicDef] = &[
-        IntrinsicDef::constructor_with_target(KEY, 0, illegal_constructor, construct_stream),
-        IntrinsicDef::call(
-            IntrinsicKey::new("ReadableStream", Slot::PrototypeGetter, "locked"),
-            0,
-            locked,
-        ),
-        IntrinsicDef::call(
-            IntrinsicKey::new("ReadableStream", Slot::Prototype, "cancel"),
-            0,
-            stream_cancel,
-        ),
-        IntrinsicDef::call(
-            IntrinsicKey::new("ReadableStream", Slot::Prototype, "getReader"),
-            0,
-            get_reader,
-        ),
-        IntrinsicDef::call(
-            IntrinsicKey::new("ReadableStream", Slot::Prototype, "pipeTo"),
-            1,
-            super::pipe::pipe_to,
-        ),
-        IntrinsicDef::call(
-            IntrinsicKey::new("ReadableStream", Slot::Prototype, "pipeThrough"),
-            1,
-            super::pipe::pipe_through,
-        ),
-        IntrinsicDef::call(
-            IntrinsicKey::new("ReadableStream", Slot::Prototype, "tee"),
-            0,
-            super::tee::tee,
-        ),
-    ];
-    Owner::new(
-        "readableStream",
-        &[
-            RootSpec::new("readableStream", RootKind::Native(KEY), FUNCTION_PARENT)
-                .fixed(STREAM_PROTO)
-                .backlink(Some(Attributes::METHOD)),
-            RootSpec::new(STREAM_PROTO, RootKind::Plain, OBJECT_PARENT),
-            RootSpec::new(
-                "ReadableStreamAsyncIterator.prototype",
-                RootKind::Plain,
-                Some(crate::builtin::iterator::ASYNC_ROOT),
-            ),
-        ],
-        &[MEMBERS, super::iteration::INTRINSICS],
-        Some(|vm, _| {
-            install(
-                vm,
-                "ReadableStream",
-                "readableStream",
-                STREAM_PROTO,
-                MEMBERS,
-            );
-            super::iteration::install(vm);
-        }),
-    )
-};
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(in crate::builtin) const STREAM_OWNER: Owner<P> = {
+        const KEY: IntrinsicKey = IntrinsicKey::new("ReadableStream", Slot::Global, "");
+        struct LocalMembers<P>(std::marker::PhantomData<P>);
+        impl<P: crate::host::PlatformServices> LocalMembers<P> {
+            const MEMBERS: &[IntrinsicDef<P>] = &[
+                IntrinsicDef::constructor_with_target(
+                    KEY,
+                    0,
+                    illegal_constructor,
+                    construct_stream,
+                ),
+                IntrinsicDef::call(
+                    IntrinsicKey::new("ReadableStream", Slot::PrototypeGetter, "locked"),
+                    0,
+                    locked,
+                ),
+                IntrinsicDef::call(
+                    IntrinsicKey::new("ReadableStream", Slot::Prototype, "cancel"),
+                    0,
+                    stream_cancel,
+                ),
+                IntrinsicDef::call(
+                    IntrinsicKey::new("ReadableStream", Slot::Prototype, "getReader"),
+                    0,
+                    get_reader,
+                ),
+                IntrinsicDef::call(
+                    IntrinsicKey::new("ReadableStream", Slot::Prototype, "pipeTo"),
+                    1,
+                    super::pipe::pipe_to,
+                ),
+                IntrinsicDef::call(
+                    IntrinsicKey::new("ReadableStream", Slot::Prototype, "pipeThrough"),
+                    1,
+                    super::pipe::pipe_through,
+                ),
+                IntrinsicDef::call(
+                    IntrinsicKey::new("ReadableStream", Slot::Prototype, "tee"),
+                    0,
+                    super::tee::tee,
+                ),
+            ];
+        }
+        Owner::new(
+            "readableStream",
+            &[
+                RootSpec::new("readableStream", RootKind::Native(KEY), FUNCTION_PARENT)
+                    .fixed(STREAM_PROTO)
+                    .backlink(Some(Attributes::METHOD)),
+                RootSpec::new(STREAM_PROTO, RootKind::Plain, OBJECT_PARENT),
+                RootSpec::new(
+                    "ReadableStreamAsyncIterator.prototype",
+                    RootKind::Plain,
+                    Some(crate::builtin::iterator::ASYNC_ROOT),
+                ),
+            ],
+            &[
+                LocalMembers::<P>::MEMBERS,
+                super::iteration::BuiltinTable::<P>::INTRINSICS,
+            ],
+            Some(|vm, _| {
+                install(
+                    vm,
+                    "ReadableStream",
+                    "readableStream",
+                    STREAM_PROTO,
+                    LocalMembers::<P>::MEMBERS,
+                );
+                super::iteration::install(vm);
+            }),
+        )
+    };
+}
 interface!(READER_OWNER, "readableStreamDefaultReader", "ReadableStreamDefaultReader", READER_PROTO,
     KEY => IntrinsicDef::constructor_with_target(KEY, 1, illegal_constructor, construct_reader),
     PrototypeGetter "closed" 0 => reader_closed,
@@ -124,9 +142,9 @@ interface!(CONTROLLER_OWNER, "readableStreamDefaultController", "ReadableStreamD
     Prototype "error" 0 => controller_error,
 );
 
-pub(super) fn illegal_constructor(
+pub(super) fn illegal_constructor<P: PlatformServices>(
     vm: &mut VmCore,
-    _: &Host,
+    _: &Host<P>,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     _: &Value,
@@ -154,13 +172,12 @@ macro_rules! converted {
 }
 pub(super) use converted;
 
-pub(super) mod bytes;
-pub(in crate::builtin) use bytes::{BYOB_READER_OWNER, BYOB_REQUEST_OWNER, BYTE_CONTROLLER_OWNER};
+pub(in crate::builtin) mod bytes;
 use bytes::{BYOB_READER_PROTO, BYTE_CONTROLLER_PROTO, enforce_unsigned};
 
-pub(super) fn member(
+pub(super) fn member<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     input: &Value,
     name: &str,
@@ -171,9 +188,9 @@ pub(super) fn member(
     })
 }
 
-pub(super) fn callback_member(
+pub(super) fn callback_member<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     input: &Value,
     name: &str,
@@ -193,9 +210,9 @@ pub(super) fn callback_member(
     }
 }
 
-fn construct_stream(
+fn construct_stream<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     target: &Value,
@@ -327,9 +344,9 @@ fn controller_of_kind(vm: &VmCore, value: &Value, byte: bool) -> Result<Option<O
     Ok((vm.readable(stream)?.byte.is_some() == byte).then_some(stream))
 }
 
-fn locked(
+fn locked<P: PlatformServices>(
     vm: &mut VmCore,
-    _: &Host,
+    _: &Host<P>,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     receiver: &Value,
@@ -342,9 +359,9 @@ fn locked(
     )))
 }
 
-fn get_reader(
+fn get_reader<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -365,9 +382,9 @@ fn get_reader(
     vm.acquire_readable_reader(roots, stream, vm.builtins.get(READER_PROTO))
 }
 
-fn construct_reader(
+fn construct_reader<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     target: &Value,
@@ -381,9 +398,9 @@ fn construct_reader(
     vm.acquire_readable_reader(roots, stream, prototype)
 }
 
-fn reader_closed(
+fn reader_closed<P: PlatformServices>(
     vm: &mut VmCore,
-    _: &Host,
+    _: &Host<P>,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     receiver: &Value,
@@ -394,9 +411,9 @@ fn reader_closed(
     Ok(promise_or_object(vm.readable_reader(reader)?.closed))
 }
 
-fn stream_cancel(
+fn stream_cancel<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -410,9 +427,9 @@ fn stream_cancel(
     vm.cancel_readable(host, roots, stream, arg(&args, 0))
 }
 
-fn reader_cancel(
+fn reader_cancel<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -426,9 +443,9 @@ fn reader_cancel(
     vm.cancel_readable(host, roots, stream, arg(&args, 0))
 }
 
-fn reader_read(
+fn reader_read<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     receiver: &Value,
@@ -439,9 +456,9 @@ fn reader_read(
     vm.read_readable(host, roots, reader)
 }
 
-fn release_lock(
+fn release_lock<P: PlatformServices>(
     vm: &mut VmCore,
-    _: &Host,
+    _: &Host<P>,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     receiver: &Value,
@@ -453,9 +470,9 @@ fn release_lock(
     Ok(Invocation::Value(Value::UNDEFINED))
 }
 
-fn desired_size(
+fn desired_size<P: PlatformServices>(
     vm: &mut VmCore,
-    _: &Host,
+    _: &Host<P>,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     receiver: &Value,
@@ -471,9 +488,9 @@ fn desired_size(
     }))
 }
 
-fn controller_close(
+fn controller_close<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     receiver: &Value,
@@ -488,9 +505,9 @@ fn controller_close(
     Ok(Invocation::Value(Value::UNDEFINED))
 }
 
-fn controller_enqueue(
+fn controller_enqueue<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -504,9 +521,9 @@ fn controller_enqueue(
     vm.enqueue_readable(host, roots, stream, arg(&args, 0))
 }
 
-fn controller_error(
+fn controller_error<P: PlatformServices>(
     vm: &mut VmCore,
-    _: &Host,
+    _: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -804,9 +821,9 @@ impl VmCore {
         Ok(())
     }
 
-    pub(crate) fn read_readable(
+    pub(crate) fn read_readable<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         reader: ObjectId,
     ) -> Result<Invocation, VmError> {
@@ -857,9 +874,9 @@ impl VmCore {
         Ok(promise_or_object(request))
     }
 
-    pub(super) fn request_readable_close(
+    pub(super) fn request_readable_close<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
     ) -> Result<(), VmError> {
@@ -874,9 +891,9 @@ impl VmCore {
         Ok(())
     }
 
-    fn close_readable(
+    fn close_readable<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
     ) -> Result<(), VmError> {
@@ -905,9 +922,9 @@ impl VmCore {
         Ok(())
     }
 
-    fn finish_read(
+    fn finish_read<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         request: ObjectId,
         chunk: Value,
@@ -959,9 +976,9 @@ impl VmCore {
         Ok(())
     }
 
-    pub(super) fn enqueue_readable(
+    pub(super) fn enqueue_readable<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         chunk: &Value,
@@ -1019,9 +1036,9 @@ impl VmCore {
         Ok(Invocation::Value(Value::UNDEFINED))
     }
 
-    pub(super) fn cancel_readable(
+    pub(super) fn cancel_readable<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         reason: &Value,
@@ -1089,9 +1106,9 @@ impl VmCore {
         Ok(promise_or_object(result))
     }
 
-    fn invoke_readable_callback(
+    fn invoke_readable_callback<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         callback: Option<Value>,
         source: &Value,
@@ -1112,9 +1129,9 @@ impl VmCore {
         }
     }
 
-    pub(super) fn pull_readable_if_needed(
+    pub(super) fn pull_readable_if_needed<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
     ) -> Result<(), VmError> {
@@ -1160,9 +1177,9 @@ impl VmCore {
         self.observe_stream_job(wait, StreamJob::ReadablePull(stream))
     }
 
-    pub(crate) fn resume_readable_job(
+    pub(crate) fn resume_readable_job<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         job: StreamJob,
         settlement: &Settlement,
@@ -1203,3 +1220,5 @@ impl VmCore {
         }
     }
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

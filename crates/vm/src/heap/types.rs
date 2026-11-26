@@ -240,7 +240,10 @@ impl NativeObject {
     pub(crate) fn constructable(&self) -> bool {
         match self {
             Self::Host { constructable, .. } => *constructable,
-            Self::Intrinsic { intrinsic, .. } => intrinsic.definition().construct.is_some(),
+            Self::Intrinsic { intrinsic, .. } => intrinsic
+                .definition::<crate::Platform>()
+                .construct
+                .is_some(),
         }
     }
 }

@@ -3,15 +3,15 @@
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{EventPayload, EventState, Object};
-use crate::host::Host;
+use crate::host::{Diagnostics, Host, PlatformServices};
 use crate::runtime::Invocation;
 use crate::value::{JsString, ObjectId, PropertyKeyRef, Value, ValueRef};
 use crate::vm::VmCore;
 
 impl VmCore {
-    pub(crate) fn report_exception(
+    pub(crate) fn report_exception<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         error: Value,
     ) -> Result<(), VmError> {
@@ -61,9 +61,9 @@ impl VmCore {
         Ok(())
     }
 
-    pub(crate) fn new_global_notification(
+    pub(crate) fn new_global_notification<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         ty: &str,
         cancelable: bool,
         payload: EventPayload,
@@ -87,9 +87,9 @@ impl VmCore {
         Ok(id)
     }
 
-    pub(crate) fn dispatch_global_notification(
+    pub(crate) fn dispatch_global_notification<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         event: ObjectId,
     ) -> Result<bool, VmError> {
@@ -99,8 +99,8 @@ impl VmCore {
         }
     }
 
-    fn deliver_exception(&self, host: &Host, error: Value) {
-        let Some(sink) = host.builtin_services().diagnostics() else {
+    fn deliver_exception<P: PlatformServices>(&self, host: &Host<P>, error: Value) {
+        let Some(sink) = host.platform().diagnostics() else {
             return;
         };
         let diagnostic = self.exception_diagnostic(&error);

@@ -2,15 +2,15 @@
 pub(crate) mod namespace {
     use crate::error::VmError;
     use crate::gc::ActiveRoots;
-    use crate::host::Host;
+    use crate::host::{Host, PlatformServices};
     use crate::runtime::Invocation;
     use crate::value::{PropertyKey, Value, ValueRef};
     use crate::vm::VmCore;
 
     #[function(name = "ownKeys", length = 1)]
-    fn own_keys(
+    fn own_keys<P: PlatformServices>(
         vm: &mut VmCore,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -33,9 +33,9 @@ pub(crate) mod namespace {
     }
 
     #[function(name = "deleteProperty", length = 2)]
-    fn delete_property(
+    fn delete_property<P: PlatformServices>(
         vm: &mut VmCore,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -55,9 +55,9 @@ pub(crate) mod namespace {
     }
 
     #[function(name = "defineProperty", length = 3)]
-    fn define_property(
+    fn define_property<P: PlatformServices>(
         vm: &mut VmCore,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -66,9 +66,9 @@ pub(crate) mod namespace {
     }
 
     #[function(name = "preventExtensions", length = 1)]
-    fn prevent_extensions(
+    fn prevent_extensions<P: PlatformServices>(
         vm: &mut VmCore,
-        _host: &Host,
+        _host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -76,9 +76,9 @@ pub(crate) mod namespace {
     }
 
     #[function(name = "isExtensible", length = 1)]
-    fn is_extensible(
+    fn is_extensible<P: PlatformServices>(
         vm: &mut VmCore,
-        _host: &Host,
+        _host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -86,9 +86,9 @@ pub(crate) mod namespace {
     }
 
     #[function(name = "getPrototypeOf", length = 1)]
-    fn get_prototype_of(
+    fn get_prototype_of<P: PlatformServices>(
         vm: &mut VmCore,
-        _host: &Host,
+        _host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -96,9 +96,9 @@ pub(crate) mod namespace {
     }
 
     #[function(name = "setPrototypeOf", length = 2)]
-    fn set_prototype_of(
+    fn set_prototype_of<P: PlatformServices>(
         vm: &mut VmCore,
-        _host: &Host,
+        _host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -106,9 +106,9 @@ pub(crate) mod namespace {
     }
 
     #[function(name = "get", length = 2)]
-    fn get(
+    fn get<P: PlatformServices>(
         vm: &mut VmCore,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -131,9 +131,9 @@ pub(crate) mod namespace {
     }
 
     #[function(name = "set", length = 3)]
-    fn set(
+    fn set<P: PlatformServices>(
         vm: &mut VmCore,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -152,9 +152,9 @@ pub(crate) mod namespace {
     }
 
     #[function(name = "has", length = 2)]
-    fn has(
+    fn has<P: PlatformServices>(
         vm: &mut VmCore,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -171,9 +171,9 @@ pub(crate) mod namespace {
     }
 
     #[function(name = "getOwnPropertyDescriptor", length = 2)]
-    fn get_own_property_descriptor(
+    fn get_own_property_descriptor<P: PlatformServices>(
         vm: &mut VmCore,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -182,9 +182,9 @@ pub(crate) mod namespace {
     }
 
     #[function(name = "apply", length = 3)]
-    fn apply(
+    fn apply<P: PlatformServices>(
         vm: &mut VmCore,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -193,9 +193,9 @@ pub(crate) mod namespace {
     }
 
     #[function(name = "construct", length = 2)]
-    fn construct(
+    fn construct<P: PlatformServices>(
         vm: &mut VmCore,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {

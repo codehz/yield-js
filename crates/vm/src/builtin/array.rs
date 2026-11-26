@@ -9,7 +9,7 @@ use crate::heap::{
     ArrayIterationKind, Attributes, DescriptorUpdate, IS_CONCAT_SPREADABLE_SYMBOL, ITERATOR_SYMBOL,
     Object, SPECIES_SYMBOL,
 };
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::ops::strict_equal;
 use crate::runtime::{Arguments, Invocation};
@@ -53,20 +53,22 @@ const ARRAY_VALUES: IntrinsicKey = IntrinsicKey::new("Array", Slot::Prototype, "
 const ARRAY_ITERATOR_NEXT: IntrinsicKey =
     IntrinsicKey::new("ArrayIterator", Slot::Prototype, "next");
 
-pub(crate) const OWNER: Owner = Owner::new(
-    members::ROOT,
-    ARRAY_ROOTS,
-    &[ARRAY_INTRINSICS, members::INTRINSICS],
-    Some(|vm, identity| {
-        vm.install_array(
-            vm.builtins.get("array"),
-            vm.builtins.get("array.prototype"),
-            vm.builtins.get("array.values"),
-            vm.builtins.get("arrayIterator.prototype"),
-            identity,
-        );
-    }),
-);
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const OWNER: Owner<P> = Owner::new(
+        members::ROOT,
+        ARRAY_ROOTS,
+        &[Self::ARRAY_INTRINSICS, members::Globals::<P>::INTRINSICS],
+        Some(|vm, identity| {
+            vm.install_array(
+                vm.builtins.get("array"),
+                vm.builtins.get("array.prototype"),
+                vm.builtins.get("array.values"),
+                vm.builtins.get("arrayIterator.prototype"),
+                identity,
+            );
+        }),
+    );
+}
 
 pub(crate) const ARRAY_ROOTS: &[RootSpec] = &[
     RootSpec::new(
@@ -88,23 +90,25 @@ pub(crate) const ARRAY_ROOTS: &[RootSpec] = &[
     ),
 ];
 
-pub(crate) const ARRAY_INTRINSICS: &[IntrinsicDef] = &[
-    IntrinsicDef::constructor(
-        ARRAY_CONSTRUCTOR,
-        1,
-        |vm, _, roots, args, _| vm.construct_array(roots, args),
-        |vm, _, roots, args, prototype| {
-            let result = vm.construct_array(roots, args)?;
-            vm.with_result_prototype(roots, result, prototype)
-        },
-    ),
-    IntrinsicDef::call(ARRAY_VALUES, 0, |vm, _, roots, _, receiver| {
-        vm.array_iterator(roots, receiver, ArrayIterationKind::Values)
-    }),
-    IntrinsicDef::call(ARRAY_ITERATOR_NEXT, 0, |vm, host, roots, _, receiver| {
-        vm.array_iterator_next(host, roots, receiver)
-    }),
-];
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const ARRAY_INTRINSICS: &[IntrinsicDef<P>] = &[
+        IntrinsicDef::constructor(
+            ARRAY_CONSTRUCTOR,
+            1,
+            |vm, _, roots, args, _| vm.construct_array(roots, args),
+            |vm, _, roots, args, prototype| {
+                let result = vm.construct_array(roots, args)?;
+                vm.with_result_prototype(roots, result, prototype)
+            },
+        ),
+        IntrinsicDef::call(ARRAY_VALUES, 0, |vm, _, roots, _, receiver| {
+            vm.array_iterator(roots, receiver, ArrayIterationKind::Values)
+        }),
+        IntrinsicDef::call(ARRAY_ITERATOR_NEXT, 0, |vm, host, roots, _, receiver| {
+            vm.array_iterator_next(host, roots, receiver)
+        }),
+    ];
+}
 
 type Completion<T> = Result<Result<T, Value>, VmError>;
 
@@ -246,9 +250,9 @@ impl VmCore {
         Ok(Ok(self.coercible_object(value)))
     }
 
-    pub(crate) fn length_of_array_like(
+    pub(crate) fn length_of_array_like<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
     ) -> Completion<u64> {
@@ -266,9 +270,9 @@ impl VmCore {
         Ok(Ok(n.trunc().max(0.0).min(MAX_SAFE_LENGTH as f64) as u64))
     }
 
-    pub(crate) fn read_array_like_index(
+    pub(crate) fn read_array_like_index<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         index: u64,
@@ -292,9 +296,9 @@ impl VmCore {
         Ok(Ok(matches!(self.heap.get(base)?, Object::Array(_))))
     }
 
-    fn construct_array_result(
+    fn construct_array_result<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         constructor: &Value,
         args: Vec<Value>,
@@ -312,9 +316,9 @@ impl VmCore {
         Ok(Ok(ArrayResult { id, fresh: false }))
     }
 
-    fn array_operation(
+    fn array_operation<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         name: &str,
         receiver: &Value,
@@ -337,9 +341,9 @@ impl VmCore {
         invocation(self.array_prototype_operation(host, roots, name, receiver, &args))
     }
 
-    fn array_prototype_operation(
+    fn array_prototype_operation<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         name: &str,
         receiver: &Value,
@@ -380,9 +384,9 @@ impl VmCore {
         }
     }
 
-    fn array_of(
+    fn array_of<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         constructor: &Value,
         args: Vec<Value>,
@@ -411,9 +415,9 @@ impl VmCore {
         Ok(Ok(Value::object(result.id)))
     }
 
-    fn array_from(
+    fn array_from<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         constructor: &Value,
         args: &[Value],
@@ -479,18 +483,19 @@ impl VmCore {
             id: result.id,
             len: length,
         };
-        let map_and_define = |access: &mut ArrayAccess<'_>, index, mut value| -> Completion<()> {
-            if mapping {
-                value = script!(completion(access.vm.invoke(
-                    access.host,
-                    access.roots,
-                    mapper,
-                    Arguments::Values(&[value, number(index)]),
-                    arg(args, 2)
-                )));
-            }
-            access.define(result, index, value)
-        };
+        let map_and_define =
+            |access: &mut ArrayAccess<'_, P>, index, mut value| -> Completion<()> {
+                if mapping {
+                    value = script!(completion(access.vm.invoke(
+                        access.host,
+                        access.roots,
+                        mapper,
+                        Arguments::Values(&[value, number(index)]),
+                        arg(args, 2)
+                    )));
+                }
+                access.define(result, index, value)
+            };
         let length = if iterable {
             let (iter, next) = script!(access.vm.get_iterator_from_method(
                 access.host,
@@ -566,20 +571,20 @@ impl crate::gc::TraceRoots for FlattenRoots<'_> {
     }
 }
 
-struct ArrayAccess<'a> {
+struct ArrayAccess<'a, P: PlatformServices> {
     vm: &'a mut VmCore,
-    host: &'a Host,
+    host: &'a Host<P>,
     roots: &'a ActiveRoots<'a>,
     id: ObjectId,
     // Snapshot once: callbacks and property hooks can mutate the live array.
     len: u64,
 }
 
-impl ArrayAccess<'_> {
+impl<P: PlatformServices> ArrayAccess<'_, P> {
     fn with_roots<T>(
         &mut self,
         view: &dyn crate::gc::TraceRoots,
-        f: impl FnOnce(&mut ArrayAccess<'_>) -> T,
+        f: impl FnOnce(&mut ArrayAccess<'_, P>) -> T,
     ) -> T {
         let roots = &self.roots.with(view);
         f(&mut ArrayAccess {
@@ -1311,3 +1316,5 @@ impl ArrayAccess<'_> {
         }
     }
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

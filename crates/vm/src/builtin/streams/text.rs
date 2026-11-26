@@ -16,7 +16,7 @@ use crate::heap::{
     Heap, Object, PlainObject, ReadableStreamObject, TextDecoderConfig, TextEncoding,
     TransformAlgorithms, TransformStage, WritableState, WritableStreamObject,
 };
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{JsString, ObjectId, Value, ValueRef};
@@ -60,9 +60,9 @@ interface!(DECODER_OWNER, "textDecoderStream", "TextDecoderStream", DECODER_PROT
     },
 );
 
-fn construct_encoder(
+fn construct_encoder<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     target: &Value,
@@ -77,9 +77,9 @@ fn construct_encoder(
     construct(vm, prototype, None)
 }
 
-fn construct_decoder(
+fn construct_decoder<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     target: &Value,
@@ -164,9 +164,9 @@ fn decoder_property(
 }
 
 impl VmCore {
-    pub(super) fn invoke_text_transform(
+    pub(super) fn invoke_text_transform<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         stage: TransformStage,
@@ -285,3 +285,5 @@ pub(super) fn validate_wrapper(
             None => stream.finish.is_some() || !matches!(writable.state, WritableState::Writable),
         }
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

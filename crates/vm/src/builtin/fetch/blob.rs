@@ -17,7 +17,7 @@ use crate::heap::{
     ArrayBufferObject, Attributes, ElementKind, Object, PlainObject, TO_STRING_TAG_SYMBOL,
     TypedArrayObject,
 };
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::{Invocation, Settlement};
 use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
@@ -71,7 +71,7 @@ pub(crate) fn alloc_file(vm: &mut VmCore, data: FileData) -> ObjectId {
     })
 }
 
-pub(crate) fn blob_now(clock: &dyn crate::host::TimeService) -> i64 {
+pub(crate) fn blob_now(clock: &impl crate::host::TimeService) -> i64 {
     clock.now_ms()
 }
 
@@ -84,123 +84,131 @@ macro_rules! converted {
     };
 }
 
-const BLOB_DEFS: &[IntrinsicDef] = &[
-    IntrinsicDef::constructor_with_target(
-        IntrinsicKey::new("Blob", Slot::Global, ""),
-        0,
-        |vm, _, roots, _, _| vm.throw_type_error(roots, "Blob constructor requires new"),
-        |vm, host, roots, args, target| construct(vm, host, roots, args, target, false),
-    ),
-    IntrinsicDef::call(
-        IntrinsicKey::new("Blob", Slot::PrototypeGetter, "size"),
-        0,
-        |vm, _, roots, _, this| {
-            blob_get(vm, roots, this, |data| {
-                Value::number((data.end - data.start) as f64)
-            })
-        },
-    ),
-    IntrinsicDef::call(
-        IntrinsicKey::new("Blob", Slot::PrototypeGetter, "type"),
-        0,
-        |vm, _, roots, _, this| {
-            blob_get(vm, roots, this, |data| {
-                Value::string(data.mime_type.as_str().into())
-            })
-        },
-    ),
-    IntrinsicDef::call(
-        IntrinsicKey::new("Blob", Slot::Prototype, "slice"),
-        0,
-        slice,
-    ),
-    IntrinsicDef::call(
-        IntrinsicKey::new("Blob", Slot::Prototype, "stream"),
-        0,
-        stream,
-    ),
-    IntrinsicDef::call(
-        IntrinsicKey::new("Blob", Slot::Prototype, "arrayBuffer"),
-        0,
-        |vm, _, roots, _, this| read(vm, roots, this, ReadAs::Buffer),
-    ),
-    IntrinsicDef::call(
-        IntrinsicKey::new("Blob", Slot::Prototype, "bytes"),
-        0,
-        |vm, _, roots, _, this| read(vm, roots, this, ReadAs::Bytes),
-    ),
-    IntrinsicDef::call(
-        IntrinsicKey::new("Blob", Slot::Prototype, "text"),
-        0,
-        |vm, _, roots, _, this| read(vm, roots, this, ReadAs::Text),
-    ),
-];
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    const BLOB_DEFS: &[IntrinsicDef<P>] = &[
+        IntrinsicDef::constructor_with_target(
+            IntrinsicKey::new("Blob", Slot::Global, ""),
+            0,
+            |vm, _, roots, _, _| vm.throw_type_error(roots, "Blob constructor requires new"),
+            |vm, host, roots, args, target| construct(vm, host, roots, args, target, false),
+        ),
+        IntrinsicDef::call(
+            IntrinsicKey::new("Blob", Slot::PrototypeGetter, "size"),
+            0,
+            |vm, _, roots, _, this| {
+                blob_get(vm, roots, this, |data| {
+                    Value::number((data.end - data.start) as f64)
+                })
+            },
+        ),
+        IntrinsicDef::call(
+            IntrinsicKey::new("Blob", Slot::PrototypeGetter, "type"),
+            0,
+            |vm, _, roots, _, this| {
+                blob_get(vm, roots, this, |data| {
+                    Value::string(data.mime_type.as_str().into())
+                })
+            },
+        ),
+        IntrinsicDef::call(
+            IntrinsicKey::new("Blob", Slot::Prototype, "slice"),
+            0,
+            slice,
+        ),
+        IntrinsicDef::call(
+            IntrinsicKey::new("Blob", Slot::Prototype, "stream"),
+            0,
+            stream,
+        ),
+        IntrinsicDef::call(
+            IntrinsicKey::new("Blob", Slot::Prototype, "arrayBuffer"),
+            0,
+            |vm, _, roots, _, this| read(vm, roots, this, ReadAs::Buffer),
+        ),
+        IntrinsicDef::call(
+            IntrinsicKey::new("Blob", Slot::Prototype, "bytes"),
+            0,
+            |vm, _, roots, _, this| read(vm, roots, this, ReadAs::Bytes),
+        ),
+        IntrinsicDef::call(
+            IntrinsicKey::new("Blob", Slot::Prototype, "text"),
+            0,
+            |vm, _, roots, _, this| read(vm, roots, this, ReadAs::Text),
+        ),
+    ];
+}
 
-const FILE_DEFS: &[IntrinsicDef] = &[
-    IntrinsicDef::constructor_with_target(
-        IntrinsicKey::new("File", Slot::Global, ""),
-        2,
-        |vm, _, roots, _, _| vm.throw_type_error(roots, "File constructor requires new"),
-        |vm, host, roots, args, target| construct(vm, host, roots, args, target, true),
-    ),
-    IntrinsicDef::call(
-        IntrinsicKey::new("File", Slot::PrototypeGetter, "name"),
-        0,
-        |vm, _, roots, _, this| {
-            file_get(vm, roots, this, |data| {
-                Value::string(data.name.as_str().into())
-            })
-        },
-    ),
-    IntrinsicDef::call(
-        IntrinsicKey::new("File", Slot::PrototypeGetter, "lastModified"),
-        0,
-        |vm, _, roots, _, this| {
-            file_get(vm, roots, this, |data| {
-                Value::number(data.last_modified as f64)
-            })
-        },
-    ),
-];
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    const FILE_DEFS: &[IntrinsicDef<P>] = &[
+        IntrinsicDef::constructor_with_target(
+            IntrinsicKey::new("File", Slot::Global, ""),
+            2,
+            |vm, _, roots, _, _| vm.throw_type_error(roots, "File constructor requires new"),
+            |vm, host, roots, args, target| construct(vm, host, roots, args, target, true),
+        ),
+        IntrinsicDef::call(
+            IntrinsicKey::new("File", Slot::PrototypeGetter, "name"),
+            0,
+            |vm, _, roots, _, this| {
+                file_get(vm, roots, this, |data| {
+                    Value::string(data.name.as_str().into())
+                })
+            },
+        ),
+        IntrinsicDef::call(
+            IntrinsicKey::new("File", Slot::PrototypeGetter, "lastModified"),
+            0,
+            |vm, _, roots, _, this| {
+                file_get(vm, roots, this, |data| {
+                    Value::number(data.last_modified as f64)
+                })
+            },
+        ),
+    ];
+}
 
-pub(crate) const BLOB_OWNER: Owner = Owner::new(
-    BLOB,
-    &[
-        RootSpec::new(
-            BLOB,
-            RootKind::Native(IntrinsicKey::new("Blob", Slot::Global, "")),
-            FUNCTION_PARENT,
-        )
-        .fixed(BLOB_PROTOTYPE)
-        .backlink(Some(Attributes::METHOD)),
-        RootSpec::new(BLOB_PROTOTYPE, RootKind::Plain, OBJECT_PARENT),
-    ],
-    &[BLOB_DEFS],
-    Some(|vm, _| install(vm, BLOB, BLOB_PROTOTYPE, "Blob", BLOB_DEFS)),
-);
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const BLOB_OWNER: Owner<P> = Owner::new(
+        BLOB,
+        &[
+            RootSpec::new(
+                BLOB,
+                RootKind::Native(IntrinsicKey::new("Blob", Slot::Global, "")),
+                FUNCTION_PARENT,
+            )
+            .fixed(BLOB_PROTOTYPE)
+            .backlink(Some(Attributes::METHOD)),
+            RootSpec::new(BLOB_PROTOTYPE, RootKind::Plain, OBJECT_PARENT),
+        ],
+        &[Self::BLOB_DEFS],
+        Some(|vm, _| install(vm, BLOB, BLOB_PROTOTYPE, "Blob", Self::BLOB_DEFS)),
+    );
+}
 
-pub(crate) const FILE_OWNER: Owner = Owner::new(
-    FILE,
-    &[
-        RootSpec::new(
-            FILE,
-            RootKind::Native(IntrinsicKey::new("File", Slot::Global, "")),
-            Some(BLOB),
-        )
-        .fixed(FILE_PROTOTYPE)
-        .backlink(Some(Attributes::METHOD)),
-        RootSpec::new(FILE_PROTOTYPE, RootKind::Plain, Some(BLOB_PROTOTYPE)),
-    ],
-    &[FILE_DEFS],
-    Some(|vm, _| install(vm, FILE, FILE_PROTOTYPE, "File", FILE_DEFS)),
-);
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const FILE_OWNER: Owner<P> = Owner::new(
+        FILE,
+        &[
+            RootSpec::new(
+                FILE,
+                RootKind::Native(IntrinsicKey::new("File", Slot::Global, "")),
+                Some(BLOB),
+            )
+            .fixed(FILE_PROTOTYPE)
+            .backlink(Some(Attributes::METHOD)),
+            RootSpec::new(FILE_PROTOTYPE, RootKind::Plain, Some(BLOB_PROTOTYPE)),
+        ],
+        &[Self::FILE_DEFS],
+        Some(|vm, _| install(vm, FILE, FILE_PROTOTYPE, "File", Self::FILE_DEFS)),
+    );
+}
 
-fn install(
+fn install<P: crate::host::PlatformServices>(
     vm: &mut VmCore,
     root: &'static str,
     proto: &'static str,
     tag: &str,
-    defs: &[IntrinsicDef],
+    defs: &[IntrinsicDef<P>],
 ) {
     let prototype = vm.builtins.get(proto);
     link_constructor(vm, vm.builtins.get(root), prototype);
@@ -271,7 +279,12 @@ fn file_get(
     vm.throw_type_error(roots, "incompatible File receiver")
 }
 
-fn usv(vm: &mut VmCore, host: &Host, roots: &ActiveRoots<'_>, value: &Value) -> Completion<String> {
+fn usv<P: PlatformServices>(
+    vm: &mut VmCore,
+    host: &Host<P>,
+    roots: &ActiveRoots<'_>,
+    value: &Value,
+) -> Completion<String> {
     Ok(vm.coerce_string(host, roots, value)?.map(|value| {
         value
             .to_utf8()
@@ -294,7 +307,12 @@ enum Part {
     Bytes(Vec<u8>),
 }
 
-fn part(vm: &mut VmCore, host: &Host, roots: &ActiveRoots<'_>, value: &Value) -> Completion<Part> {
+fn part<P: PlatformServices>(
+    vm: &mut VmCore,
+    host: &Host<P>,
+    roots: &ActiveRoots<'_>,
+    value: &Value,
+) -> Completion<Part> {
     if let Some(data) = blob_receiver(vm, value)? {
         return Ok(Ok(Part::Blob(data.clone())));
     }
@@ -311,9 +329,9 @@ fn part(vm: &mut VmCore, host: &Host, roots: &ActiveRoots<'_>, value: &Value) ->
     Ok(usv(vm, host, roots, value)?.map(Part::Text))
 }
 
-fn dictionary_member(
+fn dictionary_member<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     options: &Value,
     member: &str,
@@ -347,9 +365,9 @@ fn signed_long_long(number: f64) -> i64 {
     }
 }
 
-fn construct(
+fn construct<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     target: &Value,
@@ -465,7 +483,8 @@ fn construct(
             data: FileData {
                 blob,
                 name,
-                last_modified: last_modified.unwrap_or_else(|| blob_now(vm.time())),
+                last_modified: last_modified
+                    .unwrap_or_else(|| blob_now(&crate::builtin::time(host))),
             },
         }
     } else {
@@ -474,9 +493,9 @@ fn construct(
     Ok(Invocation::Value(Value::object(vm.heap.alloc(entry))))
 }
 
-fn slice(
+fn slice<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     this: &Value,
@@ -536,9 +555,9 @@ fn slice(
     ))))
 }
 
-fn stream(
+fn stream<P: PlatformServices>(
     vm: &mut VmCore,
-    _: &Host,
+    _: &Host<P>,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     this: &Value,
@@ -606,3 +625,5 @@ fn read(
     vm.settle(promise, settlement)?;
     Ok(Invocation::Value(Value::object(promise)))
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

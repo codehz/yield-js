@@ -18,7 +18,7 @@ pub(super) enum LocalPart {
     Time,
 }
 
-pub(super) fn parse(text: &JsString, clock: &dyn TimeService) -> Result<Option<i64>, VmError> {
+pub(super) fn parse(text: &JsString, clock: &impl TimeService) -> Result<Option<i64>, VmError> {
     // All supported spellings are ASCII; borrow the Latin-1 storage directly.
     let Some(text) = text
         .latin1_bytes()
@@ -230,7 +230,7 @@ fn number(text: &mut &str, width: usize) -> Option<i64> {
 
 pub(super) fn format_local(
     time: i64,
-    clock: &dyn TimeService,
+    clock: &impl TimeService,
     part: LocalPart,
 ) -> Result<String, VmError> {
     let offset = offset_ms(time, &clock.time_zone())?;

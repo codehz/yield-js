@@ -6,12 +6,12 @@ use yield_vm::binding::{
     Registration,
 };
 use yield_vm::host::{Completion, TimerService};
-use yield_vm::{Decode, Encode, Services, Vm, operation};
+use yield_vm::{Decode, Encode, PlatformServices, Services, Vm, operation};
 
 const MAX_DATE_MS: u64 = 8_640_000_000_000_000;
 
-#[derive(Debug, Default)]
-pub struct FakeClock(Mutex<ClockState>);
+#[derive(Clone, Debug, Default)]
+pub struct FakeClock(Arc<Mutex<ClockState>>);
 
 #[derive(Debug, Default)]
 struct ClockState {
@@ -90,7 +90,7 @@ impl FakeClock {
     }
 
     /// Advances the VM attached to this clock, draining work after each timer.
-    pub fn advance(&self, vm: &mut Vm, ms: u64) -> Result<(), String> {
+    pub fn advance(&self, vm: &mut Vm<impl PlatformServices>, ms: u64) -> Result<(), String> {
         let target = self.advance_target(ms).map_err(|error| error.to_string())?;
         while let Some((token, delivery)) =
             self.take_due(target).map_err(|error| error.to_string())?
@@ -108,7 +108,7 @@ impl FakeClock {
     }
 
     fn arm(
-        self: &Arc<Self>,
+        &self,
         token: OperationToken,
         delay: u64,
         resuming: bool,
@@ -128,7 +128,7 @@ impl FakeClock {
         };
         state.arm_count += 1;
         Ok(ArmedTimer {
-            clock: Arc::clone(self),
+            clock: self.clone(),
             token,
         })
     }
@@ -182,12 +182,12 @@ impl FakeClock {
 
 impl TimerService for FakeClock {
     fn arm(
-        self: Arc<Self>,
+        &self,
         token: OperationToken,
         delay_ms: u64,
     ) -> Result<Box<dyn LiveRegistration>, HostFault> {
         Ok(Box::new(FakeClock::arm(
-            &self,
+            self,
             token,
             delay_ms,
             false,
@@ -252,7 +252,7 @@ impl OperationDriver for Timer {
 }
 
 pub struct ArmedTimer {
-    clock: Arc<FakeClock>,
+    clock: FakeClock,
     token: OperationToken,
 }
 

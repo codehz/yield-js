@@ -26,7 +26,7 @@ impl Diagnostics for TaskDiagnostics {
     }
 }
 
-fn task_host(labels: &Rc<LabelService>) -> Host {
+fn task_host(labels: &Rc<LabelService>) -> Host<impl yield_vm::PlatformServices> {
     let module = abi::raw_module(
         "task",
         vec![
@@ -55,32 +55,28 @@ fn task_host(labels: &Rc<LabelService>) -> Host {
     );
     struct TaskServices {
         labels: Rc<LabelService>,
-        diagnostics: Rc<dyn Diagnostics>,
     }
     let layout = TaskServices {
         labels: Rc::clone(labels),
-        diagnostics: Rc::new(TaskDiagnostics::default()),
     };
     // SAFETY: These descriptors use the exact types and offsets of the layout's fields.
     let storage = unsafe {
         abi::ServiceStorage::from_layout(
             layout,
-            [
-                abi::ServiceField::of::<Rc<LabelService>>(std::mem::offset_of!(
-                    TaskServices,
-                    labels
-                )),
-                abi::ServiceField::of::<Rc<dyn Diagnostics>>(std::mem::offset_of!(
-                    TaskServices,
-                    diagnostics
-                )),
-            ],
+            [abi::ServiceField::of::<Rc<LabelService>>(
+                std::mem::offset_of!(TaskServices, labels),
+            )],
         )
     }
     .unwrap();
     let mut deps = abi::ModuleDependencies::default();
     deps.operation::<Wait>();
-    abi::link([module], deps, storage).unwrap()
+    let platform: yield_vm::Platform<yield_vm::Absent, yield_vm::Absent, TaskDiagnostics> =
+        yield_vm::Platform {
+            diagnostics: Some(TaskDiagnostics::default()),
+            ..Default::default()
+        };
+    abi::link([module], deps, storage, platform).unwrap()
 }
 
 static STAGES: [CpsStage; 2] = [
@@ -571,12 +567,10 @@ fn structured_cps_resumes_selected_arm_and_keeps_the_task_id() {
     assert_eq!(counters.count("tail"), 1);
 }
 
-fn branch_fixture() -> (
-    impl Fn() -> Host,
-    Rc<LabelService>,
-    Rc<yield_harness::Counters>,
-    Rc<TaskDiagnostics>,
-) {
+type BranchHost = Host<yield_vm::Platform<yield_vm::Absent, yield_vm::Absent, Rc<TaskDiagnostics>>>;
+type BranchFixture<F> = (F, Rc<LabelService>, Rc<Counters>, Rc<TaskDiagnostics>);
+
+fn branch_fixture() -> BranchFixture<impl Fn() -> BranchHost> {
     let labels = Rc::new(LabelService::default());
     let counters = Rc::new(yield_harness::Counters::default());
     let diagnostics = Rc::new(TaskDiagnostics::default());
@@ -590,7 +584,7 @@ fn branch_fixture() -> (
                 services: {
                     Rc<LabelService> => labels.clone(),
                     Rc<Counters> => counters.clone(),
-                    Rc<dyn Diagnostics> => diagnostics.clone(),
+                    diagnostics: diagnostics.clone(),
                 },
             }
             .unwrap()

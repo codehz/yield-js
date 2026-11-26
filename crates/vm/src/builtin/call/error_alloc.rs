@@ -5,14 +5,14 @@ use std::fmt::Write;
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, Object, PlainObject};
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::runtime::Invocation;
 use crate::value::{JsString, ObjectId, PropertyKeyRef, Value, ValueRef};
 use crate::vm::VmCore;
 impl VmCore {
-    pub(crate) fn construct_error(
+    pub(crate) fn construct_error<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         name: &str,
         prototype: &'static str,

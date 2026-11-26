@@ -32,9 +32,9 @@ interface!(BYOB_REQUEST_OWNER, "readableStreamBYOBRequest", "ReadableStreamBYOBR
     Prototype "respondWithNewView" 1 => respond_with_new_view,
 );
 
-pub(super) fn enforce_unsigned(
+pub(super) fn enforce_unsigned<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     value: &Value,
 ) -> Completion<usize> {
@@ -52,9 +52,9 @@ pub(super) fn enforce_unsigned(
     Ok(Ok(number as usize))
 }
 
-fn construct_byob_reader(
+fn construct_byob_reader<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     target: &Value,
@@ -74,9 +74,9 @@ fn construct_byob_reader(
     vm.acquire_reader(roots, stream, proto, true)
 }
 
-fn byob_closed(
+fn byob_closed<P: PlatformServices>(
     vm: &mut VmCore,
-    _: &Host,
+    _: &Host<P>,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     receiver: &Value,
@@ -87,9 +87,9 @@ fn byob_closed(
     Ok(promise_or_object(vm.readable_reader(reader)?.closed))
 }
 
-fn byob_cancel(
+fn byob_cancel<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -103,9 +103,9 @@ fn byob_cancel(
     vm.cancel_readable(host, roots, stream, arg(&args, 0))
 }
 
-fn byob_release(
+fn byob_release<P: PlatformServices>(
     vm: &mut VmCore,
-    _: &Host,
+    _: &Host<P>,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     receiver: &Value,
@@ -117,9 +117,9 @@ fn byob_release(
     Ok(Invocation::Value(Value::UNDEFINED))
 }
 
-pub(in crate::builtin::streams) fn byob_read(
+pub(in crate::builtin::streams) fn byob_read<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -213,9 +213,9 @@ pub(in crate::builtin::streams) fn byob_read(
     Ok(promise_or_object(request))
 }
 
-fn byte_desired_size(
+fn byte_desired_size<P: PlatformServices>(
     vm: &mut VmCore,
-    _: &Host,
+    _: &Host<P>,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     receiver: &Value,
@@ -231,9 +231,9 @@ fn byte_desired_size(
     }))
 }
 
-pub(in crate::builtin::streams) fn byte_close(
+pub(in crate::builtin::streams) fn byte_close<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     receiver: &Value,
@@ -252,9 +252,9 @@ pub(in crate::builtin::streams) fn byte_close(
     Ok(Invocation::Value(Value::UNDEFINED))
 }
 
-fn byte_error(
+fn byte_error<P: PlatformServices>(
     vm: &mut VmCore,
-    _: &Host,
+    _: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -266,9 +266,9 @@ fn byte_error(
     Ok(Invocation::Value(Value::UNDEFINED))
 }
 
-pub(in crate::builtin::streams) fn byte_enqueue(
+pub(in crate::builtin::streams) fn byte_enqueue<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -306,9 +306,9 @@ pub(in crate::builtin::streams) fn byte_enqueue(
     Ok(Invocation::Value(Value::UNDEFINED))
 }
 
-fn byob_request(
+fn byob_request<P: PlatformServices>(
     vm: &mut VmCore,
-    _: &Host,
+    _: &Host<P>,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     receiver: &Value,
@@ -341,9 +341,9 @@ fn byob_request(
     Ok(promise_or_object(request))
 }
 
-fn request_view(
+fn request_view<P: PlatformServices>(
     vm: &mut VmCore,
-    _: &Host,
+    _: &Host<P>,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     receiver: &Value,
@@ -369,9 +369,9 @@ fn request_stream(vm: &VmCore, receiver: &Value) -> Result<Option<ObjectId>, VmE
     }
 }
 
-fn respond(
+fn respond<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -399,9 +399,9 @@ fn respond(
     vm.respond_byte_request(host, roots, stream, written, None)
 }
 
-fn respond_with_new_view(
+fn respond_with_new_view<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -568,9 +568,9 @@ impl VmCore {
         Ok(())
     }
 
-    pub(super) fn read_byte_default(
+    pub(super) fn read_byte_default<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         reader: ObjectId,
@@ -639,9 +639,9 @@ impl VmCore {
     }
 
     /// Enqueues an owned block without a script-visible controller.
-    pub(crate) fn enqueue_byte_vec(
+    pub(crate) fn enqueue_byte_vec<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         bytes: Vec<u8>,
@@ -675,9 +675,9 @@ impl VmCore {
         self.deliver_byte_reads(host, roots, stream, ready, false)
     }
 
-    pub(crate) fn close_body_stream(
+    pub(crate) fn close_body_stream<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
     ) -> Result<(), VmError> {
@@ -898,9 +898,9 @@ impl VmCore {
 
     /// Commit and close before resolving promises. Only a read path needs to
     /// call pull after delivery, because other callers pull once at the end.
-    fn deliver_byte_reads(
+    fn deliver_byte_reads<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         ready: Vec<(ObjectId, Value)>,
@@ -924,9 +924,9 @@ impl VmCore {
         Ok(())
     }
 
-    fn close_byte_stream(
+    fn close_byte_stream<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
     ) -> Completion<()> {
@@ -953,9 +953,9 @@ impl VmCore {
         Ok(Ok(()))
     }
 
-    pub(in crate::builtin::streams) fn respond_byte_request(
+    pub(in crate::builtin::streams) fn respond_byte_request<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         written: usize,
@@ -1036,3 +1036,5 @@ impl VmCore {
         Ok(Invocation::Value(Value::UNDEFINED))
     }
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

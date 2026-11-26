@@ -14,7 +14,7 @@ use crate::gc::ActiveRoots;
 use crate::heap::{
     ArrayBufferObject, ElementKind, Object, PlainObject, ReactionJob, TypedArrayObject,
 };
-use crate::host::Host;
+use crate::host::{Host, PlatformServices, TimeService};
 use crate::intrinsic::{IntrinsicKey, Slot};
 use crate::runtime::{Arguments, Invocation, Settlement};
 use crate::value::{ObjectId, PropertyKeyRef, Value, ValueRef};
@@ -63,9 +63,9 @@ impl BodyRecord {
     }
 }
 
-pub(super) fn get(
+pub(super) fn get<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     obj: &Value,
     name: &str,
@@ -78,9 +78,9 @@ pub(super) fn get(
     )
 }
 
-pub(super) fn usv(
+pub(super) fn usv<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     value: &Value,
 ) -> Completion<String> {
@@ -89,9 +89,9 @@ pub(super) fn usv(
         .map(|value| usv_string(&value)))
 }
 
-pub(super) fn json_call(
+pub(super) fn json_call<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     name: &'static str,
     value: Value,
@@ -116,9 +116,9 @@ impl VmCore {
         })
     }
 
-    pub(crate) fn extract_body(
+    pub(crate) fn extract_body<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Completion<(BodyRecord, Option<String>)> {
@@ -187,9 +187,9 @@ impl VmCore {
         }
     }
 
-    pub(super) fn tee_fetch_body(
+    pub(super) fn tee_fetch_body<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         body: &BodyRecord,
     ) -> Completion<(BodyRecord, BodyRecord)> {
@@ -221,9 +221,9 @@ impl VmCore {
         Ok(Ok((first, second)))
     }
 
-    pub(super) fn transfer_fetch_body(
+    pub(super) fn transfer_fetch_body<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         body: &BodyRecord,
     ) -> Completion<BodyRecord> {
@@ -254,9 +254,9 @@ impl VmCore {
         }
     }
 
-    pub(crate) fn begin_fetch_body(
+    pub(crate) fn begin_fetch_body<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         body: &BodyRecord,
         mode: BodyMode,
@@ -291,9 +291,9 @@ impl VmCore {
         )
     }
 
-    fn fetch_body_read_next(
+    fn fetch_body_read_next<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         mut job: BodyRead,
     ) -> Result<(), VmError> {
@@ -313,9 +313,9 @@ impl VmCore {
         self.react(read, ReactionJob::FetchBody(job))
     }
 
-    pub(crate) fn resume_fetch_body(
+    pub(crate) fn resume_fetch_body<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         mut job: BodyRead,
         settlement: Settlement,
@@ -376,9 +376,9 @@ impl VmCore {
     }
 }
 
-pub(super) fn consume(
+pub(super) fn consume<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     body: Option<BodyRecord>,
     mode: BodyMode,
@@ -406,9 +406,9 @@ pub(super) fn rejected(
     Ok(Invocation::Value(Value::object(promise)))
 }
 
-fn package(
+fn package<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     mode: BodyMode,
     bytes: Vec<u8>,
@@ -459,7 +459,7 @@ fn package(
             value
         }
         BodyMode::FormData => {
-            let Some(entries) = parse_form(vm, mime, &bytes) else {
+            let Some(entries) = parse_form(vm, host, mime, &bytes) else {
                 return Ok(Settlement::Rejected(
                     vm.type_error(roots, "Invalid form body or Content-Type")?,
                 ));
@@ -591,8 +591,9 @@ fn parameters(mut text: &str) -> impl Iterator<Item = (&str, String)> {
     })
 }
 
-fn parse_form(
+fn parse_form<P: PlatformServices>(
     vm: &mut VmCore,
+    host: &Host<P>,
     mime: &str,
     mut bytes: &[u8],
 ) -> Option<Vec<(String, FormDataValue)>> {
@@ -683,7 +684,7 @@ fn parse_form(
                         mime_type,
                     },
                     name: filename,
-                    last_modified: vm.time().now_ms(),
+                    last_modified: crate::builtin::time(host).now_ms(),
                 },
             ))
         } else {

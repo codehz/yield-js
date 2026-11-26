@@ -14,7 +14,7 @@ use crate::heap::{
     Attributes, CryptoKey, CryptoKeyAlgorithm, CryptoKeyUsage, MAX_CRYPTO_KEY_BYTES, Object,
     PlainObject, TO_STRING_TAG_SYMBOL, ViewRange,
 };
-use crate::host::{Host, SubtleCryptoRequest};
+use crate::host::{Host, PlatformServices, SubtleCryptoRequest};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::{Invocation, Settlement};
 use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
@@ -48,36 +48,40 @@ const fn getter(name: &'static str) -> IntrinsicKey {
     IntrinsicKey::new("CryptoKey", Slot::PrototypeGetter, name)
 }
 
-pub(in crate::builtin) const SUBTLE_OWNER: Owner = Owner::new(
-    SUBTLE,
-    &[
-        RootSpec::new(SUBTLE, RootKind::Native(SUBTLE_CTOR), FUNCTION_PARENT)
-            .fixed(PROTOTYPE)
-            .backlink(Some(Attributes::METHOD)),
-    ],
-    &[&[illegal_constructor(SUBTLE_CTOR)]],
-    Some(|vm, _| link_constructor(vm, vm.builtins.get(SUBTLE), vm.builtins.get(PROTOTYPE))),
-);
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(in crate::builtin) const SUBTLE_OWNER: Owner<P> = Owner::new(
+        SUBTLE,
+        &[
+            RootSpec::new(SUBTLE, RootKind::Native(SUBTLE_CTOR), FUNCTION_PARENT)
+                .fixed(PROTOTYPE)
+                .backlink(Some(Attributes::METHOD)),
+        ],
+        &[&[illegal_constructor(SUBTLE_CTOR)]],
+        Some(|vm, _| link_constructor(vm, vm.builtins.get(SUBTLE), vm.builtins.get(PROTOTYPE))),
+    );
+}
 
-pub(in crate::builtin) const KEY_OWNER: Owner = Owner::new(
-    KEY,
-    &[
-        RootSpec::new(KEY, RootKind::Native(KEY_CTOR), FUNCTION_PARENT)
-            .fixed(KEY_PROTO)
-            .backlink(Some(Attributes::METHOD)),
-        RootSpec::new(KEY_PROTO, RootKind::Plain, OBJECT_PARENT),
-    ],
-    &[&[
-        illegal_constructor(KEY_CTOR),
-        key_getter(TYPE),
-        key_getter(EXTRACTABLE),
-        key_getter(ALGORITHM),
-        key_getter(USAGES),
-    ]],
-    Some(install_key),
-);
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(in crate::builtin) const KEY_OWNER: Owner<P> = Owner::new(
+        KEY,
+        &[
+            RootSpec::new(KEY, RootKind::Native(KEY_CTOR), FUNCTION_PARENT)
+                .fixed(KEY_PROTO)
+                .backlink(Some(Attributes::METHOD)),
+            RootSpec::new(KEY_PROTO, RootKind::Plain, OBJECT_PARENT),
+        ],
+        &[&[
+            illegal_constructor(KEY_CTOR),
+            key_getter(TYPE),
+            key_getter(EXTRACTABLE),
+            key_getter(ALGORITHM),
+            key_getter(USAGES),
+        ]],
+        Some(install_key),
+    );
+}
 
-const fn illegal_constructor(key: IntrinsicKey) -> IntrinsicDef {
+const fn illegal_constructor<P: PlatformServices>(key: IntrinsicKey) -> IntrinsicDef<P> {
     IntrinsicDef::constructor_with_target(
         key,
         0,
@@ -86,7 +90,7 @@ const fn illegal_constructor(key: IntrinsicKey) -> IntrinsicDef {
     )
 }
 
-const fn key_getter(key: IntrinsicKey) -> IntrinsicDef {
+const fn key_getter<P: PlatformServices>(key: IntrinsicKey) -> IntrinsicDef<P> {
     // Intrinsic callbacks cannot capture which member they implement.
     match key.member.as_bytes() {
         b"type" => IntrinsicDef::call(key, 0, |vm, _, roots, _, recv| {
@@ -112,24 +116,26 @@ macro_rules! promise_method {
     };
 }
 
-pub(super) const MEMBERS: &[IntrinsicDef] = &[
-    promise_method!(DIGEST, 2, digest),
-    promise_method!(IMPORT, 5, import_key),
-    promise_method!(EXPORT, 2, export_key),
-    promise_method!(DERIVE, 5, derive_key),
-    promise_method!(ENCRYPT, 3, |vm, host, roots, args| gcm(
-        vm, host, roots, args, true
-    )),
-    promise_method!(DECRYPT, 3, |vm, host, roots, args| gcm(
-        vm, host, roots, args, false
-    )),
-    promise_method!(SIGN, 3, |vm, host, roots, args| hmac(
-        vm, host, roots, args, false
-    )),
-    promise_method!(VERIFY, 4, |vm, host, roots, args| hmac(
-        vm, host, roots, args, true
-    )),
-];
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(super) const MEMBERS: &[IntrinsicDef<P>] = &[
+        promise_method!(DIGEST, 2, digest),
+        promise_method!(IMPORT, 5, import_key),
+        promise_method!(EXPORT, 2, export_key),
+        promise_method!(DERIVE, 5, derive_key),
+        promise_method!(ENCRYPT, 3, |vm, host, roots, args| gcm(
+            vm, host, roots, args, true
+        )),
+        promise_method!(DECRYPT, 3, |vm, host, roots, args| gcm(
+            vm, host, roots, args, false
+        )),
+        promise_method!(SIGN, 3, |vm, host, roots, args| hmac(
+            vm, host, roots, args, false
+        )),
+        promise_method!(VERIFY, 4, |vm, host, roots, args| hmac(
+            vm, host, roots, args, true
+        )),
+    ];
+}
 
 pub(super) fn install(vm: &mut VmCore) {
     let proto = vm.builtins.get(PROTOTYPE);
@@ -281,26 +287,26 @@ impl From<VmError> for Failure {
 }
 
 type Js<T> = Result<T, Failure>;
-type Prepare = fn(&mut VmCore, &Host, &ActiveRoots<'_>, &[Value]) -> Js<Work>;
+type Prepare<P> = fn(&mut VmCore, &Host<P>, &ActiveRoots<'_>, &[Value]) -> Js<Work>;
 
 enum Work {
     Primitive(SubtleCryptoRequest, Output),
     Local(Value),
 }
 
-fn call(
+fn call<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: &[Value],
     receiver: &Value,
     required: usize,
-    prepare: Prepare,
+    prepare: Prepare<P>,
 ) -> Result<Invocation, VmError> {
     let result = if !matches!(receiver.view(), ValueRef::Object(id) if id == vm.builtins.get(INSTANCE))
     {
         Err(Failure::Type("Incompatible SubtleCrypto receiver"))
-    } else if host.builtin_services().subtle_crypto().is_none() {
+    } else if host.platform().subtle_crypto().is_none() {
         Err(Failure::Dom(
             "NotSupportedError",
             "Host SubtleCrypto service is not available",
@@ -330,7 +336,12 @@ fn call(
     Ok(Invocation::Value(Value::object(promise)))
 }
 
-fn digest(vm: &mut VmCore, host: &Host, roots: &ActiveRoots<'_>, args: &[Value]) -> Js<Work> {
+fn digest<P: PlatformServices>(
+    vm: &mut VmCore,
+    host: &Host<P>,
+    roots: &ActiveRoots<'_>,
+    args: &[Value],
+) -> Js<Work> {
     let data = bytes(vm, &args[1])?;
     require_algorithm(vm, host, roots, &args[0], "SHA-256")?;
     Ok(Work::Primitive(
@@ -385,9 +396,9 @@ fn key_bytes(
     Ok(key.bytes.clone())
 }
 
-fn key_usages(
+fn key_usages<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     value: &Value,
     allowed: &[CryptoKeyUsage],
@@ -442,7 +453,12 @@ const AES_USAGES: &[CryptoKeyUsage] = &[CryptoKeyUsage::Encrypt, CryptoKeyUsage:
 const HMAC_USAGES: &[CryptoKeyUsage] = &[CryptoKeyUsage::Sign, CryptoKeyUsage::Verify];
 const PBKDF2_USAGES: &[CryptoKeyUsage] = &[CryptoKeyUsage::DeriveKey];
 
-fn import_key(vm: &mut VmCore, host: &Host, roots: &ActiveRoots<'_>, args: &[Value]) -> Js<Work> {
+fn import_key<P: PlatformServices>(
+    vm: &mut VmCore,
+    host: &Host<P>,
+    roots: &ActiveRoots<'_>,
+    args: &[Value],
+) -> Js<Work> {
     require_raw(&args[0])?;
     let data = bytes(vm, &args[1])?;
     let params = &args[2];
@@ -483,7 +499,12 @@ fn import_key(vm: &mut VmCore, host: &Host, roots: &ActiveRoots<'_>, args: &[Val
     Ok(Work::Local(alloc_key(vm, algorithm, usages, data)))
 }
 
-fn export_key(vm: &mut VmCore, _: &Host, _: &ActiveRoots<'_>, args: &[Value]) -> Js<Work> {
+fn export_key<P: PlatformServices>(
+    vm: &mut VmCore,
+    _: &Host<P>,
+    _: &ActiveRoots<'_>,
+    args: &[Value],
+) -> Js<Work> {
     require_raw(&args[0])?;
     let data = read_key(vm, &args[1])?.bytes.clone();
     let object = PlainObject::new(Some(vm.builtins.get(ARRAY_BUFFER_PROTOTYPE)));
@@ -496,7 +517,12 @@ fn export_key(vm: &mut VmCore, _: &Host, _: &ActiveRoots<'_>, args: &[Value]) ->
     ))))
 }
 
-fn derive_key(vm: &mut VmCore, host: &Host, roots: &ActiveRoots<'_>, args: &[Value]) -> Js<Work> {
+fn derive_key<P: PlatformServices>(
+    vm: &mut VmCore,
+    host: &Host<P>,
+    roots: &ActiveRoots<'_>,
+    args: &[Value],
+) -> Js<Work> {
     let params = &args[0];
     require_algorithm(vm, host, roots, params, "PBKDF2")?;
     let salt = dictionary_prop(vm, host, roots, params, "salt")?;
@@ -542,9 +568,9 @@ fn derive_key(vm: &mut VmCore, host: &Host, roots: &ActiveRoots<'_>, args: &[Val
     ))
 }
 
-fn gcm(
+fn gcm<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: &[Value],
     encrypt: bool,
@@ -616,9 +642,9 @@ fn gcm(
     Ok(Work::Primitive(request, Output::Bytes(output_length)))
 }
 
-fn hmac(
+fn hmac<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: &[Value],
     verify: bool,
@@ -642,9 +668,9 @@ fn hmac(
     ))
 }
 
-fn dictionary_prop(
+fn dictionary_prop<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     params: &Value,
     name: &str,
@@ -655,14 +681,19 @@ fn dictionary_prop(
     prop(vm, host, roots, params, name)
 }
 
-fn require_hash(vm: &mut VmCore, host: &Host, roots: &ActiveRoots<'_>, params: &Value) -> Js<()> {
+fn require_hash<P: PlatformServices>(
+    vm: &mut VmCore,
+    host: &Host<P>,
+    roots: &ActiveRoots<'_>,
+    params: &Value,
+) -> Js<()> {
     let hash = dictionary_prop(vm, host, roots, params, "hash")?;
     require_algorithm(vm, host, roots, &hash, "SHA-256")
 }
 
-fn unsigned(
+fn unsigned<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     input: &Value,
     max: u32,
@@ -677,9 +708,9 @@ fn unsigned(
     Ok(value as u32)
 }
 
-fn prop(
+fn prop<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     object: &Value,
     name: &str,
@@ -690,9 +721,9 @@ fn prop(
     }
 }
 
-fn algorithm_name(
+fn algorithm_name<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     algorithm: &Value,
 ) -> Js<Value> {
@@ -714,9 +745,9 @@ fn named(name: &Value, expected: &str) -> bool {
         && name.units().zip(expected.bytes()).all(|(a, b)| u8::try_from(a).is_ok_and(|a| a.eq_ignore_ascii_case(&b))))
 }
 
-fn require_algorithm(
+fn require_algorithm<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     algorithm: &Value,
     expected: &str,
@@ -756,3 +787,5 @@ fn bytes(vm: &VmCore, value: &Value) -> Js<Vec<u8>> {
     }
     Ok(source.to_vec())
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

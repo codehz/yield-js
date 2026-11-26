@@ -4,15 +4,15 @@ use crate::bytecode::{Constant, Instr};
 use crate::error::VmError;
 use crate::frame::Frame;
 use crate::gc::ActiveRoots;
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::vm::VmCore;
 
 use super::Step;
 
 impl VmCore {
-    pub(super) fn step_branch(
+    pub(super) fn step_branch<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         frame: &mut Frame,
         instr: &Instr,

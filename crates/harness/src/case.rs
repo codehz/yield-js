@@ -3,7 +3,7 @@ use yield_vm::{
     VmOptions,
 };
 
-use crate::{TestHost, compile_source};
+use crate::{TestHost, TestVm, compile_source};
 
 /// Runs one directive-headed JavaScript case against a fresh [`TestHost`].
 ///
@@ -471,7 +471,7 @@ fn json_kind(value: &serde_json::Value) -> &'static str {
 fn restore(
     name: &str,
     line: usize,
-    vm: &mut Vm,
+    vm: &mut TestVm,
     build: &yield_vm::bytecode::Build,
     host: &mut TestHost,
 ) -> Result<(), String> {
@@ -511,7 +511,7 @@ fn complete(
     name: &str,
     line: usize,
     directive: &str,
-    vm: &mut Vm,
+    vm: &mut TestVm,
     host: &mut TestHost,
     id: &str,
     completion: Completion,
@@ -544,7 +544,7 @@ fn assert_settled(
     name: &str,
     line: usize,
     directive: &str,
-    vm: &Vm,
+    vm: &TestVm,
     result: &Value,
     fulfilled: bool,
     expected: &Expected,

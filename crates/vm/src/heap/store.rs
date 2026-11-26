@@ -411,7 +411,7 @@ impl Heap {
     }
 
     pub(crate) fn alloc_intrinsic(&mut self, intrinsic: crate::intrinsic::IntrinsicId) -> ObjectId {
-        let def = intrinsic.definition();
+        let def = intrinsic.definition::<crate::Platform>();
         self.alloc(Object::Native(NativeObject::Intrinsic {
             intrinsic,
             object: PlainObject::callable(

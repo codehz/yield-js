@@ -158,16 +158,32 @@ export async function open() {
 
 #[test]
 fn subtle_pending_worker_blocks_snapshot_even_without_guest_roots() {
+    struct NonCloneDiagnostics;
+    impl yield_vm::Diagnostics for NonCloneDiagnostics {
+        fn report(&self, _: yield_vm::Diagnostic<'_>) {}
+    }
+
+    use yield_vm::PlatformServices as _;
     let mut host = TestHost::new();
+    let subtle_crypto = host.host().platform().subtle_crypto().cloned().unwrap();
+    let platform_host = yield_vm::host! {
+        services: {
+            diagnostics: NonCloneDiagnostics,
+            subtle_crypto: subtle_crypto,
+        },
+    }
+    .unwrap();
     let mut vm = Vm::new(
-        build(
+        super::support::compile_main(
             r#"
 export function run() {
     return crypto.subtle.digest("SHA-256", new Uint8Array([97, 98, 99]));
 }
 "#,
-        ),
-        host.host(),
+            &yield_compiler::Compiler::default(),
+        )
+        .unwrap(),
+        platform_host,
         Default::default(),
     )
     .unwrap();

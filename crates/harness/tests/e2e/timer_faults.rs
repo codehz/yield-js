@@ -311,12 +311,12 @@ macro_rules! timer_contract {
                 $($after)*
             }
 
-            pub(super) fn make_host(clock: &Arc<FakeClock>) -> Host {
+            pub(super) fn make_host(clock: &Arc<FakeClock>) -> Host<impl yield_vm::PlatformServices> {
                 host! {
                     dts: "../dts/contract.d.ts",
                     modules: [Api],
                     services: {
-                        std::rc::Rc<dyn yield_vm::Diagnostics> => std::rc::Rc::new(UnexpectedUncaught),
+                        diagnostics: UnexpectedUncaught,
                         std::sync::Arc<yield_harness::FakeClock> => Arc::clone(clock),
                     },
                 }.unwrap()

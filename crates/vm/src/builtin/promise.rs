@@ -1,5 +1,7 @@
 #[yield_binding_macros::builtin_global(name = "Promise", root = "promise", kind = "constructor")]
 pub(crate) mod members {
+    pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);
+
     use crate::builtin::globals::Owner;
     use crate::builtin::roots::{RootKind, RootSpec};
     use crate::builtin::{FUNCTION_PARENT, OBJECT_PARENT, define_builtin_data};
@@ -16,13 +18,22 @@ pub(crate) mod members {
             .fixed("promise.prototype"),
         RootSpec::new("promise.prototype", RootKind::Plain, OBJECT_PARENT),
     ];
-    const GLOBAL: &[IntrinsicDef] = &[IntrinsicDef::constructor(
-        CONSTRUCTOR,
-        1,
-        |vm, _, roots, _, _| vm.throw_type_error(roots, "Promise constructor requires new"),
-        |vm, host, roots, args, prototype| vm.construct_promise(host, roots, args, prototype),
-    )];
-    pub(crate) const OWNER: Owner = Owner::new(ROOT, ROOTS, &[GLOBAL, INTRINSICS], Some(install));
+    impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+        const GLOBAL: &[IntrinsicDef<P>] = &[IntrinsicDef::constructor(
+            CONSTRUCTOR,
+            1,
+            |vm, _, roots, _, _| vm.throw_type_error(roots, "Promise constructor requires new"),
+            |vm, host, roots, args, prototype| vm.construct_promise(host, roots, args, prototype),
+        )];
+    }
+    impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+        pub(crate) const OWNER: Owner<P> = Owner::new(
+            ROOT,
+            ROOTS,
+            &[Self::GLOBAL, Globals::<P>::INTRINSICS],
+            Some(install),
+        );
+    }
 
     fn install(vm: &mut VmCore, _: &Value) {
         let constructor = vm.builtins.get(ROOT);

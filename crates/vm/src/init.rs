@@ -5,14 +5,14 @@
 use super::vm::{
     IMPORT_EXPORT_ATTRIBUTES, ImportModule, MODULE_EXPORT_ATTRIBUTES, PRELOAD_EXPORT_ATTRIBUTES,
     ResolvedExport, ResolvedImports, ResolvedModule, VerifiedBuild, Vm, VmCore,
-    host_function_metadata, module_getter_capture, next_epoch, property_caches, time_source,
+    host_function_metadata, module_getter_capture, next_epoch, property_caches,
 };
 use crate::binding::{Bindings, ExportDecl, NativeTarget};
 use crate::bytecode::Build;
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, DescriptorUpdate, Heap, HostClassRecord, IntegrityLevel, Object};
-use crate::host::Host;
+use crate::host::{Diagnostics, Host, PlatformServices};
 use crate::runtime::{Arguments, VmClock};
 use crate::value::{ObjectId, PropertyKey, Value};
 use crate::{JsString, builtin::BuiltinRoots};
@@ -62,12 +62,12 @@ enum ModuleEvaluation {
     Done,
 }
 
-impl Vm {
+impl<P: PlatformServices> Vm<P> {
     /// Start a fresh VM, linking this host and running module initialization.
     /// A raw [`Build`] is validated; a [`VerifiedBuild`] reuses its validation.
     pub fn new(
         build: impl TryInto<VerifiedBuild, Error: Into<VmError>>,
-        host: Host,
+        host: Host<P>,
         options: VmOptions<'_>,
     ) -> Result<Self, VmError> {
         let base_url = options
@@ -85,7 +85,10 @@ impl Vm {
 
     /// Construct a VM using the regular startup pipeline and time its phases.
     #[doc(hidden)]
-    pub fn new_profiled(build: Build, host: Host) -> Result<(Self, crate::perf::Startup), VmError> {
+    pub fn new_profiled(
+        build: Build,
+        host: Host<P>,
+    ) -> Result<(Self, crate::perf::Startup), VmError> {
         let started = std::time::Instant::now();
         let mut digest_checked = None;
         build
@@ -113,17 +116,17 @@ impl Vm {
 }
 
 impl VmCore {
-    fn prepare(
+    fn prepare<P: PlatformServices>(
         build: VerifiedBuild,
-        host: &Host,
+        host: &Host<P>,
         clock: Option<Arc<dyn crate::TestClock>>,
     ) -> Result<Self, VmError> {
         let bindings = host.bindings();
         let resolved = Self::resolve_imports(&build, bindings)?;
         let clock = VmClock::new(clock, std::time::Duration::ZERO);
-        let mut vm = Self::empty(build, bindings, clock);
+        let mut vm = Self::empty(build, clock);
         vm.init_builtins(
-            host.builtin_services()
+            host.platform()
                 .user_agent()
                 .map(|user_agent| user_agent.0.as_str()),
         );
@@ -134,7 +137,7 @@ impl VmCore {
         Ok(vm)
     }
 
-    fn initialize_modules(&mut self, host: &Host) -> Result<(), VmError> {
+    fn initialize_modules<P: PlatformServices>(&mut self, host: &Host<P>) -> Result<(), VmError> {
         self.instantiate_modules(host)?;
         let mut states = vec![ModuleEvaluation::Pending; self.build.modules.len()];
         if let Some(preload) = self.build.preload {
@@ -152,8 +155,7 @@ impl VmCore {
         self.run_until_idle(host)
     }
 
-    fn empty(build: VerifiedBuild, bindings: &Bindings, clock: VmClock) -> Self {
-        let time = time_source(bindings);
+    fn empty(build: VerifiedBuild, clock: VmClock) -> Self {
         let module_states = Vec::new();
         let caches = property_caches(&build);
         Self {
@@ -191,7 +193,6 @@ impl VmCore {
             templates: Vec::new(),
             random_state: crate::builtin::math::RANDOM_SEED,
             clock,
-            time,
             base_url: None,
             fetch_environment: Default::default(),
             fetch_state: Default::default(),
@@ -554,7 +555,7 @@ impl VmCore {
         Ok(())
     }
 
-    fn instantiate_modules(&mut self, host: &Host) -> Result<(), VmError> {
+    fn instantiate_modules<P: PlatformServices>(&mut self, host: &Host<P>) -> Result<(), VmError> {
         let count = self.build.modules.len();
         self.module_envs.reserve(count);
         self.module_namespaces.reserve(count);
@@ -665,9 +666,9 @@ impl VmCore {
         Ok(())
     }
 
-    fn evaluate_module(
+    fn evaluate_module<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         root: u32,
         states: &mut [ModuleEvaluation],
     ) -> Result<(), VmError> {
@@ -696,9 +697,9 @@ impl VmCore {
         Ok(())
     }
 
-    fn run_module_phase(
+    fn run_module_phase<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         module: usize,
         func_id: u32,
     ) -> Result<(), VmError> {
@@ -717,7 +718,7 @@ impl VmCore {
             )?
             .into_result();
         if let Err(VmError::Thrown(error)) = &result
-            && let Some(sink) = host.builtin_services().diagnostics()
+            && let Some(sink) = host.platform().diagnostics()
         {
             sink.report(crate::host::Diagnostic::StartupException {
                 diagnostic: &self.exception_diagnostic(error),

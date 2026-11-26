@@ -6,8 +6,6 @@
 //! `UploadCredit`, and the VM grants download credit before the adapter may
 //! deliver `Data`. A transaction terminates exactly once.
 
-use std::sync::Arc;
-
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -117,7 +115,7 @@ pub enum FetchEvent {
 /// Starts exactly one hop. The returned registration owns the connection.
 pub trait FetchService: Send + Sync {
     fn start(
-        self: Arc<Self>,
+        &self,
         token: OperationToken,
         request: HopRequest,
     ) -> Result<Box<dyn FetchRegistration>, HostFault>;

@@ -4,7 +4,7 @@
 use yield_harness::{TestHost, build};
 use yield_vm::{Vm, VmOptions};
 
-fn read(vm: &mut Vm) -> String {
+fn read(vm: &mut Vm<impl yield_vm::PlatformServices>) -> String {
     vm.start("read", vec![])
         .expect("start read")
         .into_string()

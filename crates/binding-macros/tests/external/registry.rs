@@ -1,16 +1,16 @@
-use super::start_vm;
+use super::{guest_build, start_vm};
 use std::any::type_name;
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 use yield_vm::binding::CodecError;
 use yield_vm::{
-    __macro_support::decode_operation, ConsoleEvent, ConsoleSink, Decode, Encode, Host, HostFault,
-    HostModule, Operation, OperationDriver, OperationToken, Recovery, Registration, Services, host,
-    host_class, host_module, module_exports, operation,
+    __macro_support::decode_operation, Decode, Diagnostic, Diagnostics, Encode, Host, HostFault,
+    HostModule, Operation, OperationDriver, OperationToken, PlatformServices, Recovery,
+    Registration, Services, Vm, host, host_class, host_module, module_exports, operation,
 };
 
-fn fingerprint(host: Host) -> String {
+fn fingerprint(host: Host<impl PlatformServices>) -> String {
     start_vm(host, Default::default())
         .snapshot(&[])
         .unwrap()
@@ -300,19 +300,18 @@ fn rejects_duplicate_service_registrations_through_a_type_alias() {
 
 #[test]
 fn explicit_service_type_coerces_to_a_trait_object() -> Result<(), String> {
+    trait Service {}
     struct Sink;
-    impl ConsoleSink for Sink {
-        fn write(&self, _: &ConsoleEvent) {}
-    }
+    impl Service for Sink {}
 
     let sink = Arc::new(Sink);
     let host = host! {
-        services: { Arc<dyn ConsoleSink> => sink.clone() },
+        services: { Arc<dyn Service> => sink.clone() },
     }?;
     let vm = start_vm(host, Default::default());
-    let expected: Arc<dyn ConsoleSink> = sink;
+    let expected: Arc<dyn Service> = sink;
     assert!(Arc::ptr_eq(
-        vm.bind_service::<Arc<dyn ConsoleSink>>().unwrap(),
+        vm.bind_service::<Arc<dyn Service>>().unwrap(),
         &expected
     ));
     assert!(vm.bind_service::<Arc<Sink>>().is_none());
@@ -453,4 +452,70 @@ fn rejects_a_missing_required_layout_service_during_linking() {
             type_name::<Marker>(),
         ),
     );
+}
+
+struct DiagnosticCounter(Rc<Cell<u32>>);
+
+impl Diagnostics for DiagnosticCounter {
+    fn report(&self, event: Diagnostic<'_>) {
+        assert!(matches!(event, Diagnostic::StartupException { .. }));
+        self.0.set(self.0.get() + 1);
+    }
+}
+
+#[test]
+fn non_clone_diagnostics_and_same_type_custom_service_are_independent() -> Result<(), String> {
+    let platform_count = Rc::new(Cell::new(0));
+    let custom_count = Rc::new(Cell::new(0));
+    let order = Cell::new(0);
+    let make = || {
+        host! {
+            services: {
+                DiagnosticCounter => {
+                    assert_eq!(order.replace(1), 0);
+                    DiagnosticCounter(Rc::clone(&custom_count))
+                },
+                diagnostics: {
+                    assert_eq!(order.replace(2), 1);
+                    DiagnosticCounter(Rc::clone(&platform_count))
+                },
+                Clock => {
+                    assert_eq!(order.replace(3), 2);
+                    Clock(17)
+                },
+            },
+        }
+    };
+    let host = make()?;
+    assert_eq!(order.replace(0), 3);
+    assert!(host.platform().console().is_none());
+    assert!(host.platform().user_agent().is_none());
+    assert!(Rc::ptr_eq(
+        &host.platform().diagnostics().unwrap().0,
+        &platform_count
+    ));
+    let vm = start_vm(host, Default::default());
+    let custom = vm.bind_service::<DiagnosticCounter>().unwrap();
+    assert!(Rc::ptr_eq(&custom.0, &custom_count));
+
+    let throwing_guest = || guest_build(Default::default(), true);
+    assert!(Vm::new(throwing_guest(), make()?, Default::default()).is_err());
+    assert_eq!(order.get(), 3);
+    assert_eq!(platform_count.get(), 1);
+    assert_eq!(custom_count.get(), 0);
+
+    let custom_only = host! {
+        services: { DiagnosticCounter => DiagnosticCounter(Rc::clone(&custom_count)) },
+    }?;
+    assert!(custom_only.platform().diagnostics().is_none());
+    assert!(Vm::new(throwing_guest(), custom_only, Default::default()).is_err());
+    assert_eq!(custom_count.get(), 0);
+
+    let platform_only = host! {
+        services: { diagnostics: DiagnosticCounter(Rc::clone(&platform_count)) },
+    }?;
+    let vm = start_vm(platform_only, Default::default());
+    assert!(vm.bind_service::<DiagnosticCounter>().is_none());
+    assert!(host! { services: {} }?.platform().diagnostics().is_none());
+    Ok(())
 }

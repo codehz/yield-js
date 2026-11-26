@@ -1,7 +1,7 @@
 //! Shared fixtures and lifecycle helpers for snapshot tests.
 
 use yield_compiler::{CompileError, Compiler, MemoryResolver, Project};
-use yield_harness::{TestHost, build};
+use yield_harness::{TestHost, TestVm, build};
 use yield_vm::{
     Completion, Diagnostic, Diagnostics, JsValue, PromiseState, RestoreOptions, Snapshot,
     SnapshotValidation, Value, Vm, VmError,
@@ -56,7 +56,7 @@ export async function run(input) {
 "#;
 
 pub(super) struct Suspended {
-    pub(super) vm: Vm,
+    pub(super) vm: TestVm,
     pub(super) host: TestHost,
     result: Value,
 }

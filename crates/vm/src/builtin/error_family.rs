@@ -4,7 +4,7 @@ use crate::builtin::globals::Owner;
 use crate::builtin::roots::{RootKind, RootSpec};
 use crate::gc::ActiveRoots;
 use crate::heap::Attributes;
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{JsString, PropertyKeyRef, Value, ValueRef};
@@ -15,25 +15,31 @@ use crate::vm::VmCore;
 const PROTOTYPE_TO_STRING: IntrinsicKey =
     IntrinsicKey::new("error.prototype", Slot::Prototype, "toString");
 const IS_ERROR: IntrinsicKey = IntrinsicKey::new("Error", Slot::Static, "isError");
-const ERROR_STATIC_INTRINSICS: &[IntrinsicDef] =
-    &[IntrinsicDef::call(IS_ERROR, 1, |vm, _, _, args, _| {
-        let branded = match args.first().map(Value::view) {
-            Some(ValueRef::Object(id)) => vm.heap.get(id)?.has_error_brand(),
-            _ => false,
-        };
-        Ok(Invocation::Value(Value::boolean(branded)))
-    })];
-const ERROR_PROTOTYPE_INTRINSICS: &[IntrinsicDef] = &[IntrinsicDef::call(
-    PROTOTYPE_TO_STRING,
-    0,
-    |vm, host, roots, _, receiver| vm.error_to_string(host, roots, receiver),
-)];
-const NO_PROTOTYPE_INTRINSICS: &[IntrinsicDef] = &[];
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    const ERROR_STATIC_INTRINSICS: &[IntrinsicDef<P>] =
+        &[IntrinsicDef::call(IS_ERROR, 1, |vm, _, _, args, _| {
+            let branded = match args.first().map(Value::view) {
+                Some(ValueRef::Object(id)) => vm.heap.get(id)?.has_error_brand(),
+                _ => false,
+            };
+            Ok(Invocation::Value(Value::boolean(branded)))
+        })];
+}
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    const ERROR_PROTOTYPE_INTRINSICS: &[IntrinsicDef<P>] = &[IntrinsicDef::call(
+        PROTOTYPE_TO_STRING,
+        0,
+        |vm, host, roots, _, receiver| vm.error_to_string(host, roots, receiver),
+    )];
+}
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    const NO_PROTOTYPE_INTRINSICS: &[IntrinsicDef<P>] = &[];
+}
 
 impl VmCore {
-    fn error_to_string(
+    fn error_to_string<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
     ) -> Result<Invocation, VmError> {
@@ -102,77 +108,81 @@ macro_rules! error_class {
             Some("error"),
             true,
             NO_PROTOTYPE_INTRINSICS,
-            &[]
+            NO_PROTOTYPE_INTRINSICS
         );
     };
-    ($owner:ident, $name:literal, $root:literal, $parent:expr, $base:literal, $length:literal, $constructor_parent:expr, $own_message:tt, $prototype_intrinsics:expr, $static_intrinsics:expr) => {
-        pub(crate) const $owner: Owner = {
-            const PROTOTYPE: &str = concat!($root, ".prototype");
-            const KEY: IntrinsicKey = IntrinsicKey::new($name, Slot::Global, "");
-            Owner::new(
-                $root,
-                &[
-                    RootSpec::new($root, RootKind::Native(KEY), $constructor_parent)
-                        .fixed(PROTOTYPE)
-                        .backlink(Some(Attributes::METHOD)),
-                    RootSpec::new(PROTOTYPE, RootKind::Plain, $parent).with_fixed_parent(!$base),
-                ],
-                &[
-                    &[IntrinsicDef::constructor(
-                        KEY,
-                        $length,
-                        |vm, host, roots, args, _| {
-                            vm.construct_error(host, roots, $name, PROTOTYPE, args)
-                        },
-                        |vm, host, roots, args, prototype| {
-                            let result = vm.construct_error(host, roots, $name, PROTOTYPE, args)?;
-                            vm.with_result_prototype(roots, result, prototype)
-                        },
-                    )],
-                    $prototype_intrinsics,
-                    $static_intrinsics,
-                ],
-                Some(|vm, _| {
-                    let prototype = vm.builtins.get(PROTOTYPE);
-                    let constructor = vm.builtins.get($root);
-                    define_builtin_data(
-                        vm,
-                        prototype,
-                        "name",
-                        Value::string($name.into()),
-                        Attributes::METHOD,
-                    );
-                    if $own_message {
+    ($owner:ident, $name:literal, $root:literal, $parent:expr, $base:literal, $length:literal, $constructor_parent:expr, $own_message:tt, $prototype_intrinsics:ident, $static_intrinsics:ident) => {
+        impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+            pub(crate) const $owner: Owner<P> = {
+                const PROTOTYPE: &str = concat!($root, ".prototype");
+                const KEY: IntrinsicKey = IntrinsicKey::new($name, Slot::Global, "");
+                Owner::new(
+                    $root,
+                    &[
+                        RootSpec::new($root, RootKind::Native(KEY), $constructor_parent)
+                            .fixed(PROTOTYPE)
+                            .backlink(Some(Attributes::METHOD)),
+                        RootSpec::new(PROTOTYPE, RootKind::Plain, $parent)
+                            .with_fixed_parent(!$base),
+                    ],
+                    &[
+                        &[IntrinsicDef::constructor(
+                            KEY,
+                            $length,
+                            |vm, host, roots, args, _| {
+                                vm.construct_error(host, roots, $name, PROTOTYPE, args)
+                            },
+                            |vm, host, roots, args, prototype| {
+                                let result =
+                                    vm.construct_error(host, roots, $name, PROTOTYPE, args)?;
+                                vm.with_result_prototype(roots, result, prototype)
+                            },
+                        )],
+                        Self::$prototype_intrinsics,
+                        Self::$static_intrinsics,
+                    ],
+                    Some(|vm, _| {
+                        let prototype = vm.builtins.get(PROTOTYPE);
+                        let constructor = vm.builtins.get($root);
                         define_builtin_data(
                             vm,
                             prototype,
-                            "message",
-                            Value::string(JsString::default()),
+                            "name",
+                            Value::string($name.into()),
                             Attributes::METHOD,
                         );
-                    }
-                    if $root == "error" {
-                        let method = vm.alloc_intrinsic(IS_ERROR);
-                        define_builtin_data(
-                            vm,
-                            constructor,
-                            "isError",
-                            Value::object(method),
-                            Attributes::METHOD,
-                        );
-                        let method = vm.alloc_intrinsic(PROTOTYPE_TO_STRING);
-                        define_builtin_data(
-                            vm,
-                            prototype,
-                            "toString",
-                            Value::object(method),
-                            Attributes::METHOD,
-                        );
-                    }
-                    link_constructor(vm, constructor, prototype);
-                }),
-            )
-        };
+                        if $own_message {
+                            define_builtin_data(
+                                vm,
+                                prototype,
+                                "message",
+                                Value::string(JsString::default()),
+                                Attributes::METHOD,
+                            );
+                        }
+                        if $root == "error" {
+                            let method = vm.alloc_intrinsic(IS_ERROR);
+                            define_builtin_data(
+                                vm,
+                                constructor,
+                                "isError",
+                                Value::object(method),
+                                Attributes::METHOD,
+                            );
+                            let method = vm.alloc_intrinsic(PROTOTYPE_TO_STRING);
+                            define_builtin_data(
+                                vm,
+                                prototype,
+                                "toString",
+                                Value::object(method),
+                                Attributes::METHOD,
+                            );
+                        }
+                        link_constructor(vm, constructor, prototype);
+                    }),
+                )
+            };
+        }
     };
 }
 
@@ -254,5 +264,7 @@ error_class!(
     Some("error"),
     true,
     NO_PROTOTYPE_INTRINSICS,
-    &[]
+    NO_PROTOTYPE_INTRINSICS
 );
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

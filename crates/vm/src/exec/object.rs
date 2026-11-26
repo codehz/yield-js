@@ -8,15 +8,15 @@ use crate::error::VmError;
 use crate::frame::Frame;
 use crate::gc::ActiveRoots;
 use crate::heap::{Object, object_id};
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::runtime::Invocation;
 use crate::value::{PropertyKeyRef, Value, ValueRef};
 use crate::vm::VmCore;
 
 impl VmCore {
-    pub(super) fn step_object(
+    pub(super) fn step_object<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         frame: &mut Frame,
         instr: &Instr,

@@ -32,32 +32,34 @@ mod members {
     }
 }
 
-pub(crate) const OWNER: Owner = Owner::new(
-    members::ROOT,
-    &[
-        RootSpec::new(
-            members::ROOT,
-            RootKind::Native(CONSTRUCTOR),
-            FUNCTION_PARENT,
-        )
-        .fixed(PROTOTYPE),
-        RootSpec::new(PROTOTYPE, RootKind::Plain, OBJECT_PARENT),
-    ],
-    &[
-        &[IntrinsicDef::call(
-            CONSTRUCTOR,
-            0,
-            |vm, host, roots, args, _| vm.symbol_constructor(host, roots, args),
-        )],
-        members::INTRINSICS,
-        &[IntrinsicDef::call(
-            TO_PRIMITIVE,
-            1,
-            |vm, _, roots, _, receiver| vm.symbol_method(roots, receiver, "valueOf"),
-        )],
-    ],
-    Some(install),
-);
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const OWNER: Owner<P> = Owner::new(
+        members::ROOT,
+        &[
+            RootSpec::new(
+                members::ROOT,
+                RootKind::Native(CONSTRUCTOR),
+                FUNCTION_PARENT,
+            )
+            .fixed(PROTOTYPE),
+            RootSpec::new(PROTOTYPE, RootKind::Plain, OBJECT_PARENT),
+        ],
+        &[
+            &[IntrinsicDef::call(
+                CONSTRUCTOR,
+                0,
+                |vm, host, roots, args, _| vm.symbol_constructor(host, roots, args),
+            )],
+            members::Globals::<P>::INTRINSICS,
+            &[IntrinsicDef::call(
+                TO_PRIMITIVE,
+                1,
+                |vm, _, roots, _, receiver| vm.symbol_method(roots, receiver, "valueOf"),
+            )],
+        ],
+        Some(install),
+    );
+}
 
 fn install(vm: &mut VmCore, _: &Value) {
     let constructor = vm.builtins.get(members::ROOT);
@@ -99,3 +101,5 @@ fn install(vm: &mut VmCore, _: &Value) {
         define_builtin_data(vm, constructor, name, Value::symbol(id), Attributes::FIXED);
     }
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

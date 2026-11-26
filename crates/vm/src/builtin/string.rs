@@ -18,7 +18,7 @@ use crate::heap::{
     Attributes, BoxedPrimitive, ITERATOR_SYMBOL, MATCH_ALL_SYMBOL, MATCH_SYMBOL, Object,
     PlainObject, REPLACE_SYMBOL, SEARCH_SYMBOL, SPLIT_SYMBOL,
 };
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::{Arguments, Invocation};
 use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, SymbolId, Value, ValueRef};
@@ -89,7 +89,8 @@ enum StringStatic {
 #[yield_binding_macros::builtin_global(name = "String", root = "string", kind = "constructor")]
 pub(crate) mod members {
     use super::{
-        ActiveRoots, Host, Invocation, StringMethod, StringStatic, Value, VmCore, VmError,
+        ActiveRoots, Host, Invocation, PlatformServices, StringMethod, StringStatic, Value, VmCore,
+        VmError,
     };
 
     #[methods(
@@ -139,9 +140,9 @@ pub(crate) mod members {
         sub: 0 = StringMethod::SUB,
         sup: 0 = StringMethod::SUP,
     )]
-    fn call_method(
+    fn call_method<P: PlatformServices>(
         vm: &mut VmCore,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         key: StringMethod,
         receiver: &Value,
@@ -157,9 +158,9 @@ pub(crate) mod members {
         fromCodePoint: 1 = StringStatic::FromCodePoint,
         raw: 1 = StringStatic::Raw,
     )]
-    fn call_static(
+    fn call_static<P: PlatformServices>(
         vm: &mut VmCore,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         key: StringStatic,
         args: &[Value],
@@ -173,38 +174,42 @@ const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new("String", Slot::Global, "");
 const ITERATOR: IntrinsicKey = IntrinsicKey::new("String", Slot::PrototypeSymbol, "iterator");
 const ITERATOR_NEXT: IntrinsicKey = IntrinsicKey::new("StringIterator", Slot::Prototype, "next");
 
-pub(crate) const STRING_INTRINSICS: &[IntrinsicDef] = &[
-    IntrinsicDef::constructor(
-        CONSTRUCTOR,
-        1,
-        |vm, host, roots, args, _| vm.call_string(host, roots, &args),
-        |vm, host, roots, args, prototype| {
-            let result = match vm.call_string(host, roots, &args)? {
-                Invocation::Value(value) => vm.construct_object(&[value])?,
-                thrown => thrown,
-            };
-            vm.with_result_prototype(roots, result, prototype)
-        },
-    ),
-    IntrinsicDef::call(ITERATOR, 0, |vm, host, roots, _, receiver| {
-        vm.string_iterator(host, roots, receiver)
-    }),
-    IntrinsicDef::call(ITERATOR_NEXT, 0, |vm, _, roots, _, receiver| {
-        vm.string_iterator_next(roots, receiver)
-    }),
-];
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const STRING_INTRINSICS: &[IntrinsicDef<P>] = &[
+        IntrinsicDef::constructor(
+            CONSTRUCTOR,
+            1,
+            |vm, host, roots, args, _| vm.call_string(host, roots, &args),
+            |vm, host, roots, args, prototype| {
+                let result = match vm.call_string(host, roots, &args)? {
+                    Invocation::Value(value) => vm.construct_object(&[value])?,
+                    thrown => thrown,
+                };
+                vm.with_result_prototype(roots, result, prototype)
+            },
+        ),
+        IntrinsicDef::call(ITERATOR, 0, |vm, host, roots, _, receiver| {
+            vm.string_iterator(host, roots, receiver)
+        }),
+        IntrinsicDef::call(ITERATOR_NEXT, 0, |vm, _, roots, _, receiver| {
+            vm.string_iterator_next(roots, receiver)
+        }),
+    ];
+}
 
-pub(crate) const OWNER: Owner = Owner::new(
-    members::ROOT,
-    STRING_ROOTS,
-    &[STRING_INTRINSICS, members::INTRINSICS],
-    Some(|vm, identity| {
-        let ValueRef::Object(identity) = identity.view() else {
-            unreachable!("iterator identity is a function")
-        };
-        install(vm, identity);
-    }),
-);
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const OWNER: Owner<P> = Owner::new(
+        members::ROOT,
+        STRING_ROOTS,
+        &[Self::STRING_INTRINSICS, members::Globals::<P>::INTRINSICS],
+        Some(|vm, identity| {
+            let ValueRef::Object(identity) = identity.view() else {
+                unreachable!("iterator identity is a function")
+            };
+            install(vm, identity);
+        }),
+    );
+}
 
 pub(crate) const STRING_ROOTS: &[RootSpec] = &[
     RootSpec::new(
@@ -284,9 +289,9 @@ impl VmCore {
             .expect("iterator prototype stores Symbol.iterator");
     }
 
-    fn string_iterator(
+    fn string_iterator<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
     ) -> Result<Invocation, VmError> {
@@ -344,9 +349,9 @@ impl VmCore {
         self.iterator_result(Value::string(value), false)
     }
 
-    fn call_string(
+    fn call_string<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -357,9 +362,9 @@ impl VmCore {
         self.string_value(host, roots, value)
     }
 
-    fn call_string_method(
+    fn call_string_method<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         method: StringMethod,
         receiver: &Value,
@@ -433,9 +438,9 @@ impl VmCore {
         }
     }
 
-    fn call_string_static(
+    fn call_string_static<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         method: StringStatic,
         args: &[Value],
@@ -470,10 +475,10 @@ impl VmCore {
         }
     }
 
-    fn char_at(
+    fn char_at<P: PlatformServices>(
         &mut self,
         text: &JsString,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         index: &Value,
     ) -> Result<Invocation, VmError> {
@@ -486,10 +491,10 @@ impl VmCore {
         )))
     }
 
-    fn char_code_at(
+    fn char_code_at<P: PlatformServices>(
         &mut self,
         text: &JsString,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         index: &Value,
     ) -> Result<Invocation, VmError> {
@@ -503,10 +508,10 @@ impl VmCore {
         )))
     }
 
-    fn code_point_at(
+    fn code_point_at<P: PlatformServices>(
         &mut self,
         text: &JsString,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         index: &Value,
     ) -> Result<Invocation, VmError> {
@@ -522,10 +527,10 @@ impl VmCore {
         ))
     }
 
-    fn string_at(
+    fn string_at<P: PlatformServices>(
         &mut self,
         text: &JsString,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         index: &Value,
     ) -> Result<Invocation, VmError> {
@@ -541,10 +546,10 @@ impl VmCore {
         ))
     }
 
-    fn index_of(
+    fn index_of<P: PlatformServices>(
         &mut self,
         text: &JsString,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         last: bool,
@@ -573,10 +578,10 @@ impl VmCore {
         Ok(Invocation::Value(Value::number(position)))
     }
 
-    fn string_includes(
+    fn string_includes<P: PlatformServices>(
         &mut self,
         text: &JsString,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -594,10 +599,10 @@ impl VmCore {
         )))
     }
 
-    fn string_affix(
+    fn string_affix<P: PlatformServices>(
         &mut self,
         text: &JsString,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         start: bool,
@@ -633,10 +638,10 @@ impl VmCore {
         Ok(Invocation::Value(Value::boolean(matched)))
     }
 
-    fn string_slice(
+    fn string_slice<P: PlatformServices>(
         &mut self,
         text: &JsString,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -669,10 +674,10 @@ impl VmCore {
         ))))
     }
 
-    fn string_substring(
+    fn string_substring<P: PlatformServices>(
         &mut self,
         text: &JsString,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -701,10 +706,10 @@ impl VmCore {
         ))))
     }
 
-    fn string_substr(
+    fn string_substr<P: PlatformServices>(
         &mut self,
         text: &JsString,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -729,10 +734,10 @@ impl VmCore {
         )))
     }
 
-    fn string_normalize(
+    fn string_normalize<P: PlatformServices>(
         &mut self,
         text: JsString,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         form: &Value,
     ) -> Result<Invocation, VmError> {
@@ -764,10 +769,10 @@ impl VmCore {
         }
     }
 
-    fn string_html(
+    fn string_html<P: PlatformServices>(
         &mut self,
         text: &JsString,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         value: &Value,
         tag: &str,
@@ -813,10 +818,10 @@ impl VmCore {
         Ok(Invocation::Value(Value::string(JsString::from_units(out))))
     }
 
-    fn string_split(
+    fn string_split<P: PlatformServices>(
         &mut self,
         text: &JsString,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -867,10 +872,10 @@ impl VmCore {
         self.array_result(parts)
     }
 
-    fn string_concat(
+    fn string_concat<P: PlatformServices>(
         &mut self,
         text: &JsString,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -912,10 +917,10 @@ impl VmCore {
         }
     }
 
-    fn string_repeat(
+    fn string_repeat<P: PlatformServices>(
         &mut self,
         text: &JsString,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         count: &Value,
     ) -> Result<Invocation, VmError> {
@@ -950,10 +955,10 @@ impl VmCore {
         }
     }
 
-    fn string_pad(
+    fn string_pad<P: PlatformServices>(
         &mut self,
         text: &JsString,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         start: bool,
@@ -1019,10 +1024,10 @@ impl VmCore {
         }
     }
 
-    fn string_replace(
+    fn string_replace<P: PlatformServices>(
         &mut self,
         text: &JsString,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -1070,9 +1075,9 @@ impl VmCore {
 
     /// Runs the `String.prototype` protocol lookup. `None` means the caller
     /// must fall back to the plain string algorithm.
-    fn string_pattern_method(
+    fn string_pattern_method<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         method: StringMethod,
         receiver: &Value,
@@ -1168,9 +1173,9 @@ impl VmCore {
         )?))
     }
 
-    fn get_method(
+    fn get_method<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         value: &Value,
         symbol: SymbolId,
@@ -1187,9 +1192,9 @@ impl VmCore {
         }
     }
 
-    fn is_regexp(
+    fn is_regexp<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Result<Result<bool, Value>, VmError> {
@@ -1208,10 +1213,10 @@ impl VmCore {
         Ok(Ok(matches!(self.heap.get(id)?, Object::RegExp { .. })))
     }
 
-    fn string_replace_all(
+    fn string_replace_all<P: PlatformServices>(
         &mut self,
         text: &JsString,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -1285,9 +1290,9 @@ impl VmCore {
         Ok(Invocation::Value(Value::string(JsString::from_units(out))))
     }
 
-    fn string_from_char_code(
+    fn string_from_char_code<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -1305,9 +1310,9 @@ impl VmCore {
         ))))
     }
 
-    fn string_from_code_point(
+    fn string_from_code_point<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -1335,9 +1340,9 @@ impl VmCore {
         Ok(Invocation::Value(Value::string(JsString::from_units(out))))
     }
 
-    fn string_raw(
+    fn string_raw<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -1386,9 +1391,9 @@ impl VmCore {
         Ok(Invocation::Value(Value::string(out)))
     }
 
-    fn relative_index(
+    fn relative_index<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         value: &Value,
         length: usize,
@@ -1414,9 +1419,9 @@ impl VmCore {
         }))
     }
 
-    fn integer_index(
+    fn integer_index<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         value: &Value,
         infinity: bool,
@@ -1433,9 +1438,9 @@ impl VmCore {
         }))
     }
 
-    fn clamp_index(
+    fn clamp_index<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         value: &Value,
         length: usize,
@@ -1754,3 +1759,5 @@ fn substitute(
     }
     JsString::from_units(out)
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

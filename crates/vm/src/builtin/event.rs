@@ -10,7 +10,7 @@ use crate::heap::{
     Attributes, DescriptorUpdate, EventPayload, EventState, EventTargetState, Object, PlainObject,
     TO_STRING_TAG_SYMBOL,
 };
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
@@ -98,46 +98,48 @@ impl EventKind {
     }
 }
 
-const CONSTRUCTORS: &[IntrinsicDef] = &[
-    IntrinsicDef::constructor_with_target(
-        EVENT,
-        1,
-        |vm, _, roots, _, _| vm.throw_type_error(roots, "Event requires new"),
-        |vm, host, roots, args, target| {
-            construct_event(vm, host, roots, args, target, EventKind::Event)
-        },
-    ),
-    IntrinsicDef::constructor_with_target(
-        CUSTOM,
-        1,
-        |vm, _, roots, _, _| vm.throw_type_error(roots, "CustomEvent requires new"),
-        |vm, host, roots, args, target| {
-            construct_event(vm, host, roots, args, target, EventKind::Custom)
-        },
-    ),
-    IntrinsicDef::constructor_with_target(
-        TARGET,
-        0,
-        |vm, _, roots, _, _| vm.throw_type_error(roots, "EventTarget requires new"),
-        construct_target,
-    ),
-    IntrinsicDef::constructor_with_target(
-        ERROR,
-        1,
-        |vm, _, roots, _, _| vm.throw_type_error(roots, "ErrorEvent requires new"),
-        |vm, host, roots, args, target| {
-            construct_event(vm, host, roots, args, target, EventKind::Error)
-        },
-    ),
-    IntrinsicDef::constructor_with_target(
-        PROMISE_REJECTION,
-        2,
-        |vm, _, roots, _, _| vm.throw_type_error(roots, "PromiseRejectionEvent requires new"),
-        |vm, host, roots, args, target| {
-            construct_event(vm, host, roots, args, target, EventKind::PromiseRejection)
-        },
-    ),
-];
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    const CONSTRUCTORS: &[IntrinsicDef<P>] = &[
+        IntrinsicDef::constructor_with_target(
+            EVENT,
+            1,
+            |vm, _, roots, _, _| vm.throw_type_error(roots, "Event requires new"),
+            |vm, host, roots, args, target| {
+                construct_event(vm, host, roots, args, target, EventKind::Event)
+            },
+        ),
+        IntrinsicDef::constructor_with_target(
+            CUSTOM,
+            1,
+            |vm, _, roots, _, _| vm.throw_type_error(roots, "CustomEvent requires new"),
+            |vm, host, roots, args, target| {
+                construct_event(vm, host, roots, args, target, EventKind::Custom)
+            },
+        ),
+        IntrinsicDef::constructor_with_target(
+            TARGET,
+            0,
+            |vm, _, roots, _, _| vm.throw_type_error(roots, "EventTarget requires new"),
+            construct_target,
+        ),
+        IntrinsicDef::constructor_with_target(
+            ERROR,
+            1,
+            |vm, _, roots, _, _| vm.throw_type_error(roots, "ErrorEvent requires new"),
+            |vm, host, roots, args, target| {
+                construct_event(vm, host, roots, args, target, EventKind::Error)
+            },
+        ),
+        IntrinsicDef::constructor_with_target(
+            PROMISE_REJECTION,
+            2,
+            |vm, _, roots, _, _| vm.throw_type_error(roots, "PromiseRejectionEvent requires new"),
+            |vm, host, roots, args, target| {
+                construct_event(vm, host, roots, args, target, EventKind::PromiseRejection)
+            },
+        ),
+    ];
+}
 
 macro_rules! event_getter {
     ($name:literal, $read:expr) => {
@@ -149,95 +151,99 @@ macro_rules! event_getter {
     };
 }
 
-const EVENT_MEMBERS: &[IntrinsicDef] = &[
-    event_getter!("type", |e| Value::string(e.ty.clone())),
-    event_getter!("target", |e| e.target.map_or(Value::NULL, Value::object)),
-    event_getter!("srcElement", |e| e
-        .target
-        .map_or(Value::NULL, Value::object)),
-    event_getter!("currentTarget", |e| e
-        .current_target
-        .map_or(Value::NULL, Value::object)),
-    IntrinsicDef::call(
-        IntrinsicKey::new("Event", Slot::Prototype, "composedPath"),
-        0,
-        composed_path,
-    ),
-    event_getter!("eventPhase", |e| Value::number(f64::from(e.phase))),
-    IntrinsicDef::call(
-        IntrinsicKey::new("Event", Slot::Prototype, "stopPropagation"),
-        0,
-        |vm, _, roots, _, receiver| update_event(vm, roots, receiver, |e| e.stop = true),
-    ),
-    event_getter!("cancelBubble", |e| Value::boolean(e.stop)),
-    IntrinsicDef::call(SET_CANCEL_BUBBLE, 1, |vm, _, roots, args, receiver| {
-        update_event(vm, roots, receiver, |e| {
-            if args.first().is_some_and(Value::truthy) {
-                e.stop = true;
-            }
-        })
-    }),
-    IntrinsicDef::call(
-        IntrinsicKey::new("Event", Slot::Prototype, "stopImmediatePropagation"),
-        0,
-        |vm, _, roots, _, receiver| {
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    const EVENT_MEMBERS: &[IntrinsicDef<P>] = &[
+        event_getter!("type", |e| Value::string(e.ty.clone())),
+        event_getter!("target", |e| e.target.map_or(Value::NULL, Value::object)),
+        event_getter!("srcElement", |e| e
+            .target
+            .map_or(Value::NULL, Value::object)),
+        event_getter!("currentTarget", |e| e
+            .current_target
+            .map_or(Value::NULL, Value::object)),
+        IntrinsicDef::call(
+            IntrinsicKey::new("Event", Slot::Prototype, "composedPath"),
+            0,
+            composed_path,
+        ),
+        event_getter!("eventPhase", |e| Value::number(f64::from(e.phase))),
+        IntrinsicDef::call(
+            IntrinsicKey::new("Event", Slot::Prototype, "stopPropagation"),
+            0,
+            |vm, _, roots, _, receiver| update_event(vm, roots, receiver, |e| e.stop = true),
+        ),
+        event_getter!("cancelBubble", |e| Value::boolean(e.stop)),
+        IntrinsicDef::call(SET_CANCEL_BUBBLE, 1, |vm, _, roots, args, receiver| {
             update_event(vm, roots, receiver, |e| {
-                e.stop = true;
-                e.stop_immediate = true;
+                if args.first().is_some_and(Value::truthy) {
+                    e.stop = true;
+                }
             })
-        },
-    ),
-    event_getter!("bubbles", |e| Value::boolean(e.bubbles)),
-    event_getter!("cancelable", |e| Value::boolean(e.cancelable)),
-    event_getter!("returnValue", |e| Value::boolean(!e.canceled)),
-    IntrinsicDef::call(SET_RETURN_VALUE, 1, |vm, _, roots, args, receiver| {
-        update_event(vm, roots, receiver, |e| {
-            if !args.first().is_some_and(Value::truthy) {
-                cancel(e);
-            }
-        })
-    }),
-    IntrinsicDef::call(
-        IntrinsicKey::new("Event", Slot::Prototype, "preventDefault"),
-        0,
-        |vm, _, roots, _, receiver| update_event(vm, roots, receiver, cancel),
-    ),
-    event_getter!("defaultPrevented", |e| Value::boolean(e.canceled)),
-    event_getter!("composed", |e| Value::boolean(e.composed)),
-    event_getter!("timeStamp", |e| Value::number(e.time_stamp)),
-    IntrinsicDef::call(
-        IntrinsicKey::new("Event", Slot::Prototype, "initEvent"),
-        1,
-        |vm, host, roots, args, receiver| init_event(vm, host, roots, args, receiver, false),
-    ),
-    IntrinsicDef::call(TRUSTED, 0, |vm, _, roots, _, receiver| {
-        read_event(vm, roots, receiver, false, |e| Value::boolean(e.trusted))
-    }),
-];
+        }),
+        IntrinsicDef::call(
+            IntrinsicKey::new("Event", Slot::Prototype, "stopImmediatePropagation"),
+            0,
+            |vm, _, roots, _, receiver| {
+                update_event(vm, roots, receiver, |e| {
+                    e.stop = true;
+                    e.stop_immediate = true;
+                })
+            },
+        ),
+        event_getter!("bubbles", |e| Value::boolean(e.bubbles)),
+        event_getter!("cancelable", |e| Value::boolean(e.cancelable)),
+        event_getter!("returnValue", |e| Value::boolean(!e.canceled)),
+        IntrinsicDef::call(SET_RETURN_VALUE, 1, |vm, _, roots, args, receiver| {
+            update_event(vm, roots, receiver, |e| {
+                if !args.first().is_some_and(Value::truthy) {
+                    cancel(e);
+                }
+            })
+        }),
+        IntrinsicDef::call(
+            IntrinsicKey::new("Event", Slot::Prototype, "preventDefault"),
+            0,
+            |vm, _, roots, _, receiver| update_event(vm, roots, receiver, cancel),
+        ),
+        event_getter!("defaultPrevented", |e| Value::boolean(e.canceled)),
+        event_getter!("composed", |e| Value::boolean(e.composed)),
+        event_getter!("timeStamp", |e| Value::number(e.time_stamp)),
+        IntrinsicDef::call(
+            IntrinsicKey::new("Event", Slot::Prototype, "initEvent"),
+            1,
+            |vm, host, roots, args, receiver| init_event(vm, host, roots, args, receiver, false),
+        ),
+        IntrinsicDef::call(TRUSTED, 0, |vm, _, roots, _, receiver| {
+            read_event(vm, roots, receiver, false, |e| Value::boolean(e.trusted))
+        }),
+    ];
+}
 
-const CUSTOM_MEMBERS: &[IntrinsicDef] = &[
-    IntrinsicDef::call(
-        IntrinsicKey::new("CustomEvent", Slot::PrototypeGetter, "detail"),
-        0,
-        |vm, _, roots, _, receiver| {
-            read_payload(
-                vm,
-                roots,
-                receiver,
-                "Incompatible CustomEvent receiver",
-                |payload| match payload {
-                    EventPayload::CustomEvent { detail } => Some(detail.clone()),
-                    _ => None,
-                },
-            )
-        },
-    ),
-    IntrinsicDef::call(
-        IntrinsicKey::new("CustomEvent", Slot::Prototype, "initCustomEvent"),
-        1,
-        |vm, host, roots, args, receiver| init_event(vm, host, roots, args, receiver, true),
-    ),
-];
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    const CUSTOM_MEMBERS: &[IntrinsicDef<P>] = &[
+        IntrinsicDef::call(
+            IntrinsicKey::new("CustomEvent", Slot::PrototypeGetter, "detail"),
+            0,
+            |vm, _, roots, _, receiver| {
+                read_payload(
+                    vm,
+                    roots,
+                    receiver,
+                    "Incompatible CustomEvent receiver",
+                    |payload| match payload {
+                        EventPayload::CustomEvent { detail } => Some(detail.clone()),
+                        _ => None,
+                    },
+                )
+            },
+        ),
+        IntrinsicDef::call(
+            IntrinsicKey::new("CustomEvent", Slot::Prototype, "initCustomEvent"),
+            1,
+            |vm, host, roots, args, receiver| init_event(vm, host, roots, args, receiver, true),
+        ),
+    ];
+}
 
 macro_rules! payload_getter {
     ($owner:literal, $variant:ident, $field:ident, $read:expr) => {
@@ -260,90 +266,120 @@ macro_rules! payload_getter {
     };
 }
 
-const ERROR_MEMBERS: &[IntrinsicDef] = &[
-    payload_getter!("ErrorEvent", ErrorEvent, message, |v: &JsString| {
-        Value::string(v.clone())
-    }),
-    payload_getter!("ErrorEvent", ErrorEvent, filename, |v: &JsString| {
-        Value::string(v.clone())
-    }),
-    payload_getter!("ErrorEvent", ErrorEvent, lineno, |&v: &u32| Value::number(
-        f64::from(v)
-    )),
-    payload_getter!("ErrorEvent", ErrorEvent, colno, |&v: &u32| Value::number(
-        f64::from(v)
-    )),
-    payload_getter!("ErrorEvent", ErrorEvent, error, Value::clone),
-];
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    const ERROR_MEMBERS: &[IntrinsicDef<P>] = &[
+        payload_getter!("ErrorEvent", ErrorEvent, message, |v: &JsString| {
+            Value::string(v.clone())
+        }),
+        payload_getter!("ErrorEvent", ErrorEvent, filename, |v: &JsString| {
+            Value::string(v.clone())
+        }),
+        payload_getter!("ErrorEvent", ErrorEvent, lineno, |&v: &u32| Value::number(
+            f64::from(v)
+        )),
+        payload_getter!("ErrorEvent", ErrorEvent, colno, |&v: &u32| Value::number(
+            f64::from(v)
+        )),
+        payload_getter!("ErrorEvent", ErrorEvent, error, Value::clone),
+    ];
+}
 
-const PROMISE_REJECTION_MEMBERS: &[IntrinsicDef] = &[
-    payload_getter!(
-        "PromiseRejectionEvent",
-        PromiseRejectionEvent,
-        promise,
-        |&v: &ObjectId| Value::object(v)
-    ),
-    payload_getter!(
-        "PromiseRejectionEvent",
-        PromiseRejectionEvent,
-        reason,
-        Value::clone
-    ),
-];
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    const PROMISE_REJECTION_MEMBERS: &[IntrinsicDef<P>] = &[
+        payload_getter!(
+            "PromiseRejectionEvent",
+            PromiseRejectionEvent,
+            promise,
+            |&v: &ObjectId| Value::object(v)
+        ),
+        payload_getter!(
+            "PromiseRejectionEvent",
+            PromiseRejectionEvent,
+            reason,
+            Value::clone
+        ),
+    ];
+}
 
 pub(crate) const TRUSTED_DISPATCH_KEY: IntrinsicKey =
     IntrinsicKey::new("EventTarget", Slot::Static, "dispatchEvent");
 
-const TARGET_MEMBERS: &[IntrinsicDef] = &[
-    IntrinsicDef::call(
-        IntrinsicKey::new("EventTarget", Slot::Prototype, "addEventListener"),
-        2,
-        dispatch::add_listener,
-    ),
-    IntrinsicDef::call(
-        IntrinsicKey::new("EventTarget", Slot::Prototype, "removeEventListener"),
-        2,
-        dispatch::remove_listener,
-    ),
-    IntrinsicDef::call(
-        IntrinsicKey::new("EventTarget", Slot::Prototype, "dispatchEvent"),
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    const TARGET_MEMBERS: &[IntrinsicDef<P>] = &[
+        IntrinsicDef::call(
+            IntrinsicKey::new("EventTarget", Slot::Prototype, "addEventListener"),
+            2,
+            dispatch::add_listener,
+        ),
+        IntrinsicDef::call(
+            IntrinsicKey::new("EventTarget", Slot::Prototype, "removeEventListener"),
+            2,
+            dispatch::remove_listener,
+        ),
+        IntrinsicDef::call(
+            IntrinsicKey::new("EventTarget", Slot::Prototype, "dispatchEvent"),
+            1,
+            dispatch::dispatch_untrusted,
+        ),
+    ];
+}
+
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    const INTERNAL: &[IntrinsicDef<P>] = &[IntrinsicDef::call(
+        TRUSTED_DISPATCH_KEY,
         1,
-        dispatch::dispatch_untrusted,
-    ),
-];
+        dispatch::dispatch_trusted,
+    )];
+}
 
-const INTERNAL: &[IntrinsicDef] = &[IntrinsicDef::call(
-    TRUSTED_DISPATCH_KEY,
-    1,
-    dispatch::dispatch_trusted,
-)];
-
-pub(crate) const OWNER: Owner = Owner::new(
-    EVENT_ROOT,
-    ROOTS,
-    &[
-        CONSTRUCTORS,
-        EVENT_MEMBERS,
-        CUSTOM_MEMBERS,
-        ERROR_MEMBERS,
-        PROMISE_REJECTION_MEMBERS,
-        TARGET_MEMBERS,
-        INTERNAL,
-    ],
-    Some(install),
-);
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const OWNER: Owner<P> = Owner::new(
+        EVENT_ROOT,
+        ROOTS,
+        &[
+            Self::CONSTRUCTORS,
+            Self::EVENT_MEMBERS,
+            Self::CUSTOM_MEMBERS,
+            Self::ERROR_MEMBERS,
+            Self::PROMISE_REJECTION_MEMBERS,
+            Self::TARGET_MEMBERS,
+            Self::INTERNAL,
+        ],
+        Some(install),
+    );
+}
 
 fn install(vm: &mut VmCore, _: &Value) {
     for (root, proto, tag, members) in [
-        (EVENT_ROOT, EVENT_PROTOTYPE, EVENT.owner, EVENT_MEMBERS),
-        (CUSTOM_ROOT, CUSTOM_PROTOTYPE, CUSTOM.owner, CUSTOM_MEMBERS),
-        (TARGET_ROOT, TARGET_PROTOTYPE, TARGET.owner, TARGET_MEMBERS),
-        (ERROR_ROOT, ERROR_PROTOTYPE, ERROR.owner, ERROR_MEMBERS),
+        (
+            EVENT_ROOT,
+            EVENT_PROTOTYPE,
+            EVENT.owner,
+            BuiltinTable::<crate::host::Platform>::EVENT_MEMBERS,
+        ),
+        (
+            CUSTOM_ROOT,
+            CUSTOM_PROTOTYPE,
+            CUSTOM.owner,
+            BuiltinTable::<crate::host::Platform>::CUSTOM_MEMBERS,
+        ),
+        (
+            TARGET_ROOT,
+            TARGET_PROTOTYPE,
+            TARGET.owner,
+            BuiltinTable::<crate::host::Platform>::TARGET_MEMBERS,
+        ),
+        (
+            ERROR_ROOT,
+            ERROR_PROTOTYPE,
+            ERROR.owner,
+            BuiltinTable::<crate::host::Platform>::ERROR_MEMBERS,
+        ),
         (
             PROMISE_REJECTION_ROOT,
             PROMISE_REJECTION_PROTOTYPE,
             PROMISE_REJECTION.owner,
-            PROMISE_REJECTION_MEMBERS,
+            BuiltinTable::<crate::host::Platform>::PROMISE_REJECTION_MEMBERS,
         ),
     ] {
         let ctor = vm.builtins.get(root);
@@ -379,7 +415,11 @@ fn install(vm: &mut VmCore, _: &Value) {
     }
 }
 
-fn install_members(vm: &mut VmCore, prototype: ObjectId, members: &[IntrinsicDef]) {
+fn install_members<P: crate::host::PlatformServices>(
+    vm: &mut VmCore,
+    prototype: ObjectId,
+    members: &[IntrinsicDef<P>],
+) {
     let attributes = members
         .iter()
         .filter(|def| matches!(def.key.slot, Slot::PrototypeGetter));
@@ -518,9 +558,9 @@ fn cancel(event: &mut EventState) {
     }
 }
 
-fn composed_path(
+fn composed_path<P: PlatformServices>(
     vm: &mut VmCore,
-    _: &Host,
+    _: &Host<P>,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     receiver: &Value,
@@ -542,9 +582,9 @@ fn composed_path(
     incompatible_receiver(vm, roots, false)
 }
 
-fn init_event(
+fn init_event<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -592,9 +632,9 @@ fn detail_or_null(value: &Value) -> Value {
     }
 }
 
-pub(super) fn new_target_prototype(
+pub(super) fn new_target_prototype<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     new_target: &Value,
     fallback: &'static str,
@@ -610,9 +650,9 @@ pub(super) fn new_target_prototype(
     )
 }
 
-fn construct_event(
+fn construct_event<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     new_target: &Value,
@@ -780,9 +820,9 @@ impl VmCore {
     }
 }
 
-fn construct_target(
+fn construct_target<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     new_target: &Value,
@@ -798,3 +838,5 @@ fn construct_target(
         },
     ))))
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

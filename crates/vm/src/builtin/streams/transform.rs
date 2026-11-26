@@ -21,7 +21,7 @@ use crate::heap::{
     TransformStreamObject, TypedArrayObject, WritableFlight, WritableSink, WritableState,
     WritableStreamObject,
 };
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::{Arguments, Invocation, Settlement};
 use crate::value::{ObjectId, Value, ValueRef};
@@ -43,9 +43,9 @@ interface!(TRANSFORM_CONTROLLER_OWNER, "transformStreamDefaultController", "Tran
     Prototype "terminate" 0 => terminate,
 );
 
-fn construct(
+fn construct<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     target: &Value,
@@ -130,9 +130,9 @@ fn construct(
     }
 }
 
-fn strategy_mark(
+fn strategy_mark<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     input: &Value,
     default: f64,
@@ -144,9 +144,9 @@ fn strategy_mark(
     }
 }
 
-fn readable(
+fn readable<P: PlatformServices>(
     vm: &mut VmCore,
-    _: &Host,
+    _: &Host<P>,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     this: &Value,
@@ -159,9 +159,9 @@ fn readable(
     )))
 }
 
-fn writable(
+fn writable<P: PlatformServices>(
     vm: &mut VmCore,
-    _: &Host,
+    _: &Host<P>,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     this: &Value,
@@ -174,9 +174,9 @@ fn writable(
     )))
 }
 
-fn desired_size(
+fn desired_size<P: PlatformServices>(
     vm: &mut VmCore,
-    _: &Host,
+    _: &Host<P>,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     this: &Value,
@@ -192,9 +192,9 @@ fn desired_size(
     }))
 }
 
-fn enqueue(
+fn enqueue<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     this: &Value,
@@ -205,9 +205,9 @@ fn enqueue(
     vm.transform_enqueue(host, roots, stream, arg(&args, 0))
 }
 
-fn error(
+fn error<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     this: &Value,
@@ -219,9 +219,9 @@ fn error(
     Ok(Invocation::Value(Value::UNDEFINED))
 }
 
-fn terminate(
+fn terminate<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     this: &Value,
@@ -396,9 +396,9 @@ impl VmCore {
         })))
     }
 
-    pub(in crate::builtin) fn transform_enqueue(
+    pub(in crate::builtin) fn transform_enqueue<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         chunk: &Value,
@@ -460,9 +460,9 @@ impl VmCore {
         Ok(())
     }
 
-    fn transform_error_writable(
+    fn transform_error_writable<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         error: &Value,
@@ -476,9 +476,9 @@ impl VmCore {
         self.unblock_transform_write(stream)
     }
 
-    fn transform_error(
+    fn transform_error<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         error: &Value,
@@ -493,9 +493,9 @@ impl VmCore {
         Ok(p)
     }
 
-    pub(super) fn invoke_transform_write(
+    pub(super) fn invoke_transform_write<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         chunk: &Value,
@@ -515,9 +515,9 @@ impl VmCore {
 
     /// Native algorithms are durable heap state and use the same settlement
     /// path as guest callbacks, including flush and cancellation.
-    fn invoke_transform_algorithm(
+    fn invoke_transform_algorithm<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         stage: TransformStage,
@@ -566,9 +566,9 @@ impl VmCore {
         self.invoke(host, roots, &callback, Arguments::Values(args), &receiver)
     }
 
-    fn perform_transform(
+    fn perform_transform<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         chunk: &Value,
@@ -579,9 +579,9 @@ impl VmCore {
         self.wait_transform(stream, wait, TransformStage::Transform)
     }
 
-    pub(super) fn invoke_transform_flush(
+    pub(super) fn invoke_transform_flush<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
     ) -> Result<ObjectId, VmError> {
@@ -594,9 +594,9 @@ impl VmCore {
         )
     }
 
-    pub(super) fn invoke_transform_cancel(
+    pub(super) fn invoke_transform_cancel<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         reason: &Value,
@@ -610,9 +610,9 @@ impl VmCore {
         self.finish_transform(host, roots, stream, stage, reason)
     }
 
-    fn finish_transform(
+    fn finish_transform<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         stage: TransformStage,
@@ -634,9 +634,9 @@ impl VmCore {
         Ok(result)
     }
 
-    fn transform_callback_promise(
+    fn transform_callback_promise<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         invocation: Invocation,
     ) -> Result<ObjectId, VmError> {
@@ -665,9 +665,9 @@ impl VmCore {
         self.observe_stream_job(wait, StreamJob::Transform(stream, stage))
     }
 
-    pub(super) fn resume_transform_job(
+    pub(super) fn resume_transform_job<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         stage: TransformStage,
@@ -939,3 +939,5 @@ pub(super) fn endpoint_defaults(
         && readable.size.is_none()
         && writable.sink.size.is_none()
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

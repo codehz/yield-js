@@ -13,28 +13,30 @@ use crate::heap::{
     ArrayBufferObject, Attributes, BoxedPrimitive, DataViewObject, Object, PlainObject,
     TypedArrayObject, ViewRange, view_range,
 };
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
 use crate::vm::VmCore;
 
 const KEY: IntrinsicKey = IntrinsicKey::new("structuredClone", Slot::Global, "");
-pub(super) const OWNER: Owner = Owner::new(
-    "structuredClone",
-    &[RootSpec::new(
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(super) const OWNER: Owner<P> = Owner::new(
         "structuredClone",
-        RootKind::Native(KEY),
-        FUNCTION_PARENT,
-    )],
-    &[&[IntrinsicDef::call(KEY, 1, |vm, host, roots, args, _| {
-        Ok(match clone(vm, host, &roots.with(&args), &args)? {
-            Ok(value) => Invocation::Value(value),
-            Err(error) => Invocation::Thrown(error),
-        })
-    })]],
-    None,
-);
+        &[RootSpec::new(
+            "structuredClone",
+            RootKind::Native(KEY),
+            FUNCTION_PARENT,
+        )],
+        &[&[IntrinsicDef::call(KEY, 1, |vm, host, roots, args, _| {
+            Ok(match clone(vm, host, &roots.with(&args), &args)? {
+                Ok(value) => Invocation::Value(value),
+                Err(error) => Invocation::Thrown(error),
+            })
+        })]],
+        None,
+    );
+}
 
 macro_rules! normal {
     ($result:expr) => {
@@ -45,9 +47,9 @@ macro_rules! normal {
     };
 }
 
-fn get(
+fn get<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     receiver: &Value,
     key: PropertyKeyRef<'_>,
@@ -58,9 +60,9 @@ fn get(
     })
 }
 
-fn transfer_list(
+fn transfer_list<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     options: &Value,
 ) -> Completion<Vec<ObjectId>> {
@@ -108,9 +110,9 @@ fn transfer_list(
     }
 }
 
-pub(super) fn clone_message(
+pub(super) fn clone_message<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     value: &Value,
 ) -> Completion<Value> {
@@ -129,9 +131,9 @@ fn rejected<T>(vm: &mut VmCore) -> Completion<T> {
     )))
 }
 
-fn clone(
+fn clone<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: &[Value],
 ) -> Completion<Value> {
@@ -225,10 +227,10 @@ impl TraceRoots for Graph {
 }
 
 impl Graph {
-    fn walk(
+    fn walk<P: PlatformServices>(
         &mut self,
         vm: &mut VmCore,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         value: Value,
     ) -> Completion<Value> {
@@ -297,10 +299,10 @@ impl Graph {
         Ok(Ok(result))
     }
 
-    fn object(
+    fn object<P: PlatformServices>(
         &mut self,
         vm: &mut VmCore,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         source: ObjectId,
     ) -> Completion<ObjectId> {
@@ -513,10 +515,10 @@ impl Graph {
         self.buffer(vm, source)
     }
 
-    fn error(
+    fn error<P: PlatformServices>(
         &mut self,
         vm: &mut VmCore,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         source: ObjectId,
     ) -> Completion<ObjectId> {
@@ -598,3 +600,5 @@ fn alloc_buffer(
         max_byte_length,
     }))
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

@@ -6,7 +6,7 @@ use crate::builtin::{ROOT_FUNCTION_PROTOTYPE, ROOT_PROXY, RootKind, RootSpec};
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, DescriptorUpdate, Object, OwnProperty, PlainObject, Property};
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::ops;
 use crate::runtime::{Arguments, Invocation};
@@ -16,21 +16,29 @@ use crate::vm::VmCore;
 const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new("Proxy", Slot::Global, "");
 const REVOCABLE: IntrinsicKey = IntrinsicKey::new("Proxy", Slot::Static, "revocable");
 
-const PROXY_INTRINSICS: &[IntrinsicDef] = &[
-    IntrinsicDef::constructor(
-        CONSTRUCTOR,
-        2,
-        |vm, _, roots, _, _| vm.throw_type_error(roots, "Proxy requires new"),
-        |vm, _, roots, args, _| vm.construct_proxy(roots, &args),
-    )
-    .without_new_target_prototype(),
-    IntrinsicDef::call(REVOCABLE, 2, |vm, _, roots, args, _| {
-        vm.proxy_revocable(roots, &args)
-    }),
-];
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    const PROXY_INTRINSICS: &[IntrinsicDef<P>] = &[
+        IntrinsicDef::constructor(
+            CONSTRUCTOR,
+            2,
+            |vm, _, roots, _, _| vm.throw_type_error(roots, "Proxy requires new"),
+            |vm, _, roots, args, _| vm.construct_proxy(roots, &args),
+        )
+        .without_new_target_prototype(),
+        IntrinsicDef::call(REVOCABLE, 2, |vm, _, roots, args, _| {
+            vm.proxy_revocable(roots, &args)
+        }),
+    ];
+}
 
-pub(crate) const OWNER: Owner =
-    Owner::new(ROOT_PROXY, PROXY_ROOTS, &[PROXY_INTRINSICS], Some(install));
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const OWNER: Owner<P> = Owner::new(
+        ROOT_PROXY,
+        PROXY_ROOTS,
+        &[Self::PROXY_INTRINSICS],
+        Some(install),
+    );
+}
 
 fn install(vm: &mut VmCore, _: &Value) {
     let method = vm.alloc_intrinsic(REVOCABLE);
@@ -174,9 +182,9 @@ impl VmCore {
         })))
     }
 
-    fn proxy_trap(
+    fn proxy_trap<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         handler: ObjectId,
         name: &str,
@@ -205,9 +213,9 @@ impl VmCore {
         }
     }
 
-    pub(crate) fn proxy_get(
+    pub(crate) fn proxy_get<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
         handler: ObjectId,
@@ -253,9 +261,9 @@ impl VmCore {
         clippy::too_many_arguments,
         reason = "Explicit active roots at a guest call boundary"
     )]
-    pub(crate) fn proxy_set(
+    pub(crate) fn proxy_set<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         proxy: (ObjectId, ObjectId),
         receiver: &Value,
@@ -311,9 +319,9 @@ impl VmCore {
         Ok(Invocation::Value(Value::boolean(true)))
     }
 
-    pub(crate) fn proxy_presence(
+    pub(crate) fn proxy_presence<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
         handler: ObjectId,
@@ -353,9 +361,9 @@ impl VmCore {
         Ok(Invocation::Value(Value::boolean(flag)))
     }
 
-    pub(crate) fn own_keys(
+    pub(crate) fn own_keys<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         include_metadata: bool,
@@ -492,9 +500,9 @@ impl VmCore {
         Ok(Ok(keys))
     }
 
-    pub(crate) fn enumerable_string_keys(
+    pub(crate) fn enumerable_string_keys<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
     ) -> Result<Result<Vec<JsString>, Value>, VmError> {
@@ -520,9 +528,9 @@ impl VmCore {
         Ok(Ok(names))
     }
 
-    pub(crate) fn own_descriptor(
+    pub(crate) fn own_descriptor<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         key: PropertyKeyRef<'_>,
@@ -618,9 +626,9 @@ impl VmCore {
         Ok(Ok(Some((property, attrs))))
     }
 
-    pub(crate) fn for_in_next(
+    pub(crate) fn for_in_next<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         iterator: ObjectId,
     ) -> Result<Result<Option<JsString>, Value>, VmError> {
@@ -702,3 +710,5 @@ fn key_value(key: PropertyKeyRef<'_>) -> Value {
         PropertyKeyRef::Symbol(key) => Value::symbol(key),
     }
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

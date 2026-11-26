@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use crate::console::{ConsoleEvent, ConsoleGroup, ConsoleLevel, ConsolePayload};
 use crate::gc::ActiveRoots;
-use crate::host::Host;
+use crate::host::{ConsoleSink, Host, PlatformServices};
 use crate::runtime::Invocation;
 use crate::value::ValueRef;
 use crate::vm::VmCore;
@@ -12,9 +12,9 @@ use crate::{JsString, Value, VmError, ops};
 
 use super::{Method, logging};
 
-pub(super) fn call(
+pub(super) fn call<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: &[Value],
     method: Method,
@@ -84,9 +84,9 @@ pub(super) fn call(
     })
 }
 
-fn label_method(
+fn label_method<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     rest: &[Value],
     method: Method,
     mut label: JsString,
@@ -147,9 +147,9 @@ fn label_method(
     print_message(vm, host, level, message, rest)
 }
 
-fn print_message(
+fn print_message<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     level: ConsoleLevel,
     message: JsString,
     rest: &[Value],
@@ -171,13 +171,13 @@ fn print_message(
     print(vm, host, level, ConsolePayload::Args(args))
 }
 
-fn print(
+fn print<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     level: ConsoleLevel,
     payload: ConsolePayload,
 ) -> Result<(), Value> {
-    let Some(sink) = host.builtin_services().console() else {
+    let Some(sink) = host.platform().console() else {
         return Err(vm.alloc_dom_exception(
             "NotSupportedError".into(),
             "Console service is not available".into(),

@@ -48,6 +48,9 @@
 //!
 //! Assemble VM resources with [`host!`], or use [`Host::default`] for a VM
 //! with no external capabilities.
+//! In `host!`, use `name: value` for a built-in platform service and
+//! `Type => value` for a custom service. Only custom services participate in
+//! `bind_service` and callback dependency resolution.
 
 extern crate self as yield_vm;
 
@@ -98,9 +101,9 @@ pub use fetch::{
 };
 pub use heap::{Object, PromiseState};
 pub use host::{
-    Completion, ConsoleSink, CryptoService, Diagnostic, Diagnostics, DummyTimeService, GcRoots,
-    Host, SubtleCryptoRequest, SubtleCryptoService, SystemTimeService, TimeService, TimerService,
-    UserAgent,
+    Absent, Completion, ConsoleSink, CryptoService, Diagnostic, Diagnostics, DummyTimeService,
+    GcRoots, Host, Platform, PlatformServices, SubtleCryptoRequest, SubtleCryptoService,
+    SystemTimeService, TimeService, TimerService, UserAgent,
 };
 pub use init::{RestoreOptions, SnapshotValidation, VmOptions};
 pub use regexp::{RegExpFlags, validate_regexp};

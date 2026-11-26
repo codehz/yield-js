@@ -6,14 +6,14 @@ use crate::gc::ActiveRoots;
 use crate::heap::{
     CombineKind, CombineState, Object, PlainObject, PromiseCallback, PromiseState, Resolution,
 };
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::runtime::{Arguments, Invocation, Settlement};
 use crate::value::{ObjectId, PropertyKeyRef, Value};
 use crate::vm::VmCore;
 impl VmCore {
-    pub(crate) fn combine(
+    pub(crate) fn combine<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         kind: CombineKind,
@@ -28,7 +28,7 @@ impl VmCore {
         };
         let capability_roots = (&result, &resolve, &reject);
         let roots = &roots.with(&capability_roots);
-        let reject_result = |vm: &mut Self, host: &Host, roots: &ActiveRoots<'_>, error| {
+        let reject_result = |vm: &mut Self, host: &Host<P>, roots: &ActiveRoots<'_>, error| {
             vm.call_promise_capability(host, roots, result.clone(), &reject, error)
         };
         let input_resolve =
@@ -179,9 +179,9 @@ impl VmCore {
         Ok((resolve_id, reject_id))
     }
 
-    pub(crate) fn capability_call(
+    pub(crate) fn capability_call<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         value: Value,
@@ -244,9 +244,9 @@ impl VmCore {
         Ok(())
     }
 
-    pub(crate) fn run_call_handler(
+    pub(crate) fn run_call_handler<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         handler: &Option<Value>,
         argument: &Value,
@@ -280,9 +280,9 @@ impl VmCore {
         Ok(())
     }
 
-    pub(crate) fn run_queue_call(
+    pub(crate) fn run_queue_call<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         function: &Value,
         args: &[Value],
@@ -306,9 +306,9 @@ impl VmCore {
             .ok_or_else(|| VmError::InvalidState(format!("missing Promise combinator state {id}")))
     }
 
-    pub(super) fn call_combine_element(
+    pub(super) fn call_combine_element<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         state: ObjectId,
         index: usize,
@@ -342,9 +342,9 @@ impl VmCore {
 
     // Release one remaining count, either for an element or for iterator exhaustion.
 
-    fn finish_combine_element(
+    fn finish_combine_element<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         state: ObjectId,
     ) -> Result<Invocation, VmError> {

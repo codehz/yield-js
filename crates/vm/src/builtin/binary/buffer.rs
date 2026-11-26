@@ -9,7 +9,7 @@ use crate::builtin::define_builtin_data;
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{ArrayBufferObject, Attributes, Object, PlainObject, TO_STRING_TAG_SYMBOL};
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::{Arguments, Invocation};
 use crate::value::{ObjectId, PropertyKeyRef, Value, ValueRef};
@@ -30,59 +30,61 @@ const TRANSFER: IntrinsicKey = IntrinsicKey::new("ArrayBuffer", Slot::Prototype,
 const TRANSFER_FIXED: IntrinsicKey =
     IntrinsicKey::new("ArrayBuffer", Slot::Prototype, "transferToFixedLength");
 
-pub(super) const INTRINSICS: &[IntrinsicDef] = &[
-    IntrinsicDef::constructor_with_target(
-        ARRAY_BUFFER,
-        1,
-        |vm, _, roots, _, _| vm.throw_type_error(roots, "Constructor ArrayBuffer requires new"),
-        construct,
-    ),
-    IntrinsicDef::call(SPECIES, 0, |_, _, _, _, receiver| {
-        Ok(Invocation::Value(receiver.clone()))
-    }),
-    IntrinsicDef::call(IS_VIEW, 1, |vm, _, _, args, _| {
-        Ok(Invocation::Value(Value::boolean(is_view(
-            &vm.heap,
-            arg(&args, 0),
-        ))))
-    }),
-    IntrinsicDef::call(BYTE_LENGTH, 0, |vm, _, roots, _, receiver| {
-        property(vm, roots, receiver, |buffer| {
-            Value::number(buffer.byte_length().unwrap_or(0) as f64)
-        })
-    }),
-    IntrinsicDef::call(MAX_LENGTH, 0, |vm, _, roots, _, receiver| {
-        property(vm, roots, receiver, |buffer| {
-            let length = match (buffer.byte_length(), buffer.max_byte_length) {
-                (None, _) | (Some(_), None) => buffer.byte_length().unwrap_or(0),
-                (Some(_), Some(max)) => max,
-            };
-            Value::number(length as f64)
-        })
-    }),
-    IntrinsicDef::call(RESIZABLE, 0, |vm, _, roots, _, receiver| {
-        property(vm, roots, receiver, |buffer| {
-            Value::boolean(buffer.is_resizable())
-        })
-    }),
-    IntrinsicDef::call(DETACHED, 0, |vm, _, roots, _, receiver| {
-        property(vm, roots, receiver, |buffer| {
-            Value::boolean(buffer.is_detached())
-        })
-    }),
-    IntrinsicDef::call(SLICE, 2, |vm, host, roots, args, receiver| {
-        vm.array_buffer_slice(host, roots, receiver, &args)
-    }),
-    IntrinsicDef::call(RESIZE, 1, |vm, host, roots, args, receiver| {
-        vm.array_buffer_resize(host, roots, receiver, &args)
-    }),
-    IntrinsicDef::call(TRANSFER, 0, |vm, host, roots, args, receiver| {
-        vm.array_buffer_transfer(host, roots, receiver, &args, true)
-    }),
-    IntrinsicDef::call(TRANSFER_FIXED, 0, |vm, host, roots, args, receiver| {
-        vm.array_buffer_transfer(host, roots, receiver, &args, false)
-    }),
-];
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(super) const INTRINSICS: &[IntrinsicDef<P>] = &[
+        IntrinsicDef::constructor_with_target(
+            ARRAY_BUFFER,
+            1,
+            |vm, _, roots, _, _| vm.throw_type_error(roots, "Constructor ArrayBuffer requires new"),
+            construct,
+        ),
+        IntrinsicDef::call(SPECIES, 0, |_, _, _, _, receiver| {
+            Ok(Invocation::Value(receiver.clone()))
+        }),
+        IntrinsicDef::call(IS_VIEW, 1, |vm, _, _, args, _| {
+            Ok(Invocation::Value(Value::boolean(is_view(
+                &vm.heap,
+                arg(&args, 0),
+            ))))
+        }),
+        IntrinsicDef::call(BYTE_LENGTH, 0, |vm, _, roots, _, receiver| {
+            property(vm, roots, receiver, |buffer| {
+                Value::number(buffer.byte_length().unwrap_or(0) as f64)
+            })
+        }),
+        IntrinsicDef::call(MAX_LENGTH, 0, |vm, _, roots, _, receiver| {
+            property(vm, roots, receiver, |buffer| {
+                let length = match (buffer.byte_length(), buffer.max_byte_length) {
+                    (None, _) | (Some(_), None) => buffer.byte_length().unwrap_or(0),
+                    (Some(_), Some(max)) => max,
+                };
+                Value::number(length as f64)
+            })
+        }),
+        IntrinsicDef::call(RESIZABLE, 0, |vm, _, roots, _, receiver| {
+            property(vm, roots, receiver, |buffer| {
+                Value::boolean(buffer.is_resizable())
+            })
+        }),
+        IntrinsicDef::call(DETACHED, 0, |vm, _, roots, _, receiver| {
+            property(vm, roots, receiver, |buffer| {
+                Value::boolean(buffer.is_detached())
+            })
+        }),
+        IntrinsicDef::call(SLICE, 2, |vm, host, roots, args, receiver| {
+            vm.array_buffer_slice(host, roots, receiver, &args)
+        }),
+        IntrinsicDef::call(RESIZE, 1, |vm, host, roots, args, receiver| {
+            vm.array_buffer_resize(host, roots, receiver, &args)
+        }),
+        IntrinsicDef::call(TRANSFER, 0, |vm, host, roots, args, receiver| {
+            vm.array_buffer_transfer(host, roots, receiver, &args, true)
+        }),
+        IntrinsicDef::call(TRANSFER_FIXED, 0, |vm, host, roots, args, receiver| {
+            vm.array_buffer_transfer(host, roots, receiver, &args, false)
+        }),
+    ];
+}
 
 pub(super) fn install(vm: &mut VmCore) {
     let constructor = vm.builtins.get(super::ARRAY_BUFFER_ROOT);
@@ -123,9 +125,9 @@ fn property(
     Ok(Invocation::Value(read(buffer)))
 }
 
-fn construct(
+fn construct<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     new_target: &Value,
@@ -160,9 +162,9 @@ fn construct(
 }
 
 /// GetArrayBufferMaxByteLengthOption: a non-object options value is ignored.
-pub(super) fn max_byte_length_option(
+pub(super) fn max_byte_length_option<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     options: &Value,
 ) -> Completion<Option<usize>> {
@@ -187,9 +189,9 @@ pub(super) fn max_byte_length_option(
 }
 
 impl VmCore {
-    fn array_buffer_slice(
+    fn array_buffer_slice<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         args: &[Value],
@@ -292,9 +294,9 @@ impl VmCore {
         Ok(Invocation::Value(created))
     }
 
-    fn array_buffer_resize(
+    fn array_buffer_resize<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         args: &[Value],
@@ -360,9 +362,9 @@ impl VmCore {
         Ok(Ok(()))
     }
 
-    fn array_buffer_transfer(
+    fn array_buffer_transfer<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         args: &[Value],
@@ -464,9 +466,9 @@ impl VmCore {
     }
 
     /// SpeciesConstructor: the `constructor` property, then `@@species`.
-    pub(crate) fn species_constructor(
+    pub(crate) fn species_constructor<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         value: &Value,
         default: &'static str,
@@ -506,3 +508,5 @@ impl VmCore {
         Ok(Ok(constructor))
     }
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

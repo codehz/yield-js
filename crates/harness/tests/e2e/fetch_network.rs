@@ -6,9 +6,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use yield_harness::fetch::LoopbackFetchService;
-use yield_harness::{TestHost, build};
+use yield_harness::{TestHost, TestVm, build};
 use yield_vm::fetch::{FetchEnvironment, Origin};
 use yield_vm::{Vm, VmOptions};
+
+type LoopbackService = Arc<LoopbackFetchService>;
+type LoopbackVm = TestVm<LoopbackService>;
 
 use super::fetch_http::{ScriptedResponse, Server};
 
@@ -25,7 +28,7 @@ fn environment(server: &Server, authorization: &str) -> FetchEnvironment {
     }
 }
 
-fn pump(vm: &mut Vm, service: &LoopbackFetchService) -> Result<(), String> {
+fn pump(vm: &mut LoopbackVm, service: &LoopbackFetchService) -> Result<(), String> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let mut delivered = false;
@@ -50,7 +53,7 @@ fn pump(vm: &mut Vm, service: &LoopbackFetchService) -> Result<(), String> {
     }
 }
 
-fn run(server: &Server, script: String) -> Result<(TestHost, Vm), String> {
+fn run(server: &Server, script: String) -> Result<(TestHost<LoopbackService>, LoopbackVm), String> {
     let service = Arc::new(LoopbackFetchService::new([server.endpoint()]));
     let mut host = TestHost::with_fetch_service(service.clone());
     let environment = environment(server, "loopback");
@@ -70,7 +73,7 @@ fn run(server: &Server, script: String) -> Result<(TestHost, Vm), String> {
     Ok((host, vm))
 }
 
-fn export(vm: &Vm, name: &str) -> String {
+fn export(vm: &Vm<impl yield_vm::PlatformServices>, name: &str) -> String {
     vm.get_export(name)
         .unwrap()
         .into_string()
@@ -147,7 +150,10 @@ fn fetch_only_if_cached_miss_sends_no_connection() {
     assert_eq!(server.requests().len(), 0);
 }
 
-fn run_multi(servers: &[&Server], script: String) -> Result<(TestHost, Vm), String> {
+fn run_multi(
+    servers: &[&Server],
+    script: String,
+) -> Result<(TestHost<LoopbackService>, LoopbackVm), String> {
     let endpoints: Vec<String> = servers.iter().map(|server| server.endpoint()).collect();
     let service = Arc::new(LoopbackFetchService::new(endpoints));
     let mut host = TestHost::with_fetch_service(service.clone());
@@ -441,10 +447,15 @@ mod snapshot {
     use std::sync::Arc;
 
     use yield_harness::fetch::{ControllableFetchService, FetchCall};
-    use yield_harness::{TestHost, build};
+    use yield_harness::{TestHost, TestVm, build};
     use yield_vm::binding::OperationToken;
     use yield_vm::fetch::{FetchEnvironment, FetchEvent, ResponseHead};
-    use yield_vm::{RestoreOptions, SnapshotValidation, Vm, VmOptions};
+    use yield_vm::{
+        FetchService, PlatformServices, RestoreOptions, SnapshotValidation, Vm, VmOptions,
+    };
+
+    type Service = Arc<ControllableFetchService>;
+    type ControlledVm = TestVm<Service>;
 
     fn environment() -> FetchEnvironment {
         FetchEnvironment {
@@ -469,11 +480,11 @@ mod snapshot {
         }
     }
 
-    fn start(service: &Arc<ControllableFetchService>) -> (TestHost, Vm) {
+    fn start(service: &Service) -> (TestHost<Service>, ControlledVm) {
         start_with(service, SCRIPT)
     }
 
-    fn start_with(service: &Arc<ControllableFetchService>, source: &str) -> (TestHost, Vm) {
+    fn start_with(service: &Service, source: &str) -> (TestHost<Service>, ControlledVm) {
         let mut host = TestHost::with_fetch_service(service.clone());
         let environment = environment();
         host.set_fetch_environment(environment.clone());
@@ -501,7 +512,7 @@ mod snapshot {
     }
 
     fn deliver(
-        vm: &mut Vm,
+        vm: &mut ControlledVm,
         service: &Arc<ControllableFetchService>,
         token: OperationToken,
         event: FetchEvent,
@@ -513,7 +524,7 @@ mod snapshot {
         vm.run_until_idle().unwrap();
     }
 
-    fn outcome(vm: &Vm) -> String {
+    fn outcome(vm: &Vm<impl PlatformServices>) -> String {
         vm.get_export("outcome")
             .unwrap()
             .into_string()
@@ -522,7 +533,11 @@ mod snapshot {
             .unwrap()
     }
 
-    fn restore(vm: &Vm, build_source: &str, host: &TestHost) -> Vm {
+    fn restore<F: FetchService + Clone + 'static>(
+        vm: &ControlledVm,
+        build_source: &str,
+        host: &TestHost<F>,
+    ) -> TestVm<F> {
         let snapshot = vm.snapshot(&[]).unwrap();
         let snapshot = yield_vm::Snapshot::from_bytes(&snapshot.to_bytes().unwrap()).unwrap();
         Vm::restore(
@@ -655,7 +670,7 @@ mod snapshot {
     "#;
 
     fn accept(
-        vm: &mut Vm,
+        vm: &mut ControlledVm,
         service: &Arc<ControllableFetchService>,
         token: OperationToken,
         event: FetchEvent,

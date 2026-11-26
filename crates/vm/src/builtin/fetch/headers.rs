@@ -14,7 +14,7 @@ use crate::builtin::{
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, ITERATOR_SYMBOL, Object, PlainObject, TO_STRING_TAG_SYMBOL};
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::{Arguments, Invocation};
 use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
@@ -64,18 +64,20 @@ macro_rules! methods {
         const METHODS: &[(&str, IntrinsicKey)] = &[
             $(($name, IntrinsicKey::new(NAME, Slot::Prototype, $name))),+
         ];
-        const INTRINSICS: &[IntrinsicDef] = &[
-            IntrinsicDef::constructor(CONSTRUCTOR, 0,
-                |vm, _, roots, _, _| vm.throw_type_error(roots, "Headers requires new"),
-                |vm, host, roots, args, prototype| vm.construct_headers(host, roots, &args, prototype),
-            ),
-            IntrinsicDef::call(NEXT, 0, |vm, _, roots, _, receiver| vm.headers_next(roots, receiver)),
-            $(IntrinsicDef::call(IntrinsicKey::new(NAME, Slot::Prototype, $name), $length,
-                |vm, host, roots, args, receiver| {
-                    vm.headers_method(host, roots, receiver, &args, Method::$method, $length)
-                },
-            )),+
-        ];
+        impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+            const INTRINSICS: &[IntrinsicDef<P>] = &[
+                IntrinsicDef::constructor(CONSTRUCTOR, 0,
+                    |vm, _, roots, _, _| vm.throw_type_error(roots, "Headers requires new"),
+                    |vm, host, roots, args, prototype| vm.construct_headers(host, roots, &args, prototype),
+                ),
+                IntrinsicDef::call(NEXT, 0, |vm, _, roots, _, receiver| vm.headers_next(roots, receiver)),
+                $(IntrinsicDef::call(IntrinsicKey::new(NAME, Slot::Prototype, $name), $length,
+                    |vm, host, roots, args, receiver| {
+                        vm.headers_method(host, roots, receiver, &args, Method::$method, $length)
+                    },
+                )),+
+            ];
+        }
     };
 }
 
@@ -92,7 +94,10 @@ methods! {
     ForEach => "forEach" / 1,
 }
 
-pub(crate) const HEADERS_OWNER: Owner = Owner::new(ROOT, ROOTS, &[INTRINSICS], Some(install));
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const HEADERS_OWNER: Owner<P> =
+        Owner::new(ROOT, ROOTS, &[Self::INTRINSICS], Some(install));
+}
 
 fn install(vm: &mut VmCore, _: &Value) {
     let prototype = vm.builtins.get(PROTOTYPE);
@@ -422,9 +427,9 @@ impl VmCore {
         })
     }
 
-    fn headers_bytes(
+    fn headers_bytes<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Completion<Vec<u8>> {
@@ -446,9 +451,9 @@ impl VmCore {
         }
     }
 
-    fn construct_headers(
+    fn construct_headers<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         prototype: Option<ObjectId>,
@@ -465,9 +470,9 @@ impl VmCore {
         Ok(Invocation::Value(Value::object(id)))
     }
 
-    pub(crate) fn headers_from_init(
+    pub(crate) fn headers_from_init<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         init: &Value,
         guard: HeadersGuard,
@@ -512,9 +517,9 @@ impl VmCore {
         Ok(Ok(data))
     }
 
-    fn headers_from_record(
+    fn headers_from_record<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         init: &Value,
         id: ObjectId,
@@ -546,9 +551,9 @@ impl VmCore {
         Ok(Ok(pairs))
     }
 
-    fn headers_from_sequence(
+    fn headers_from_sequence<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         init: &Value,
         method: &Value,
@@ -569,9 +574,9 @@ impl VmCore {
         Ok(Ok(pairs))
     }
 
-    fn headers_pair(
+    fn headers_pair<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         item: &Value,
     ) -> Completion<Option<HeaderPair>> {
@@ -603,9 +608,9 @@ impl VmCore {
         Ok(Ok(if extra { None } else { name.zip(value) }))
     }
 
-    fn headers_method(
+    fn headers_method<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         args: &[Value],
@@ -694,9 +699,9 @@ impl VmCore {
         Ok(Invocation::Value(Value::UNDEFINED))
     }
 
-    fn headers_for_each(
+    fn headers_for_each<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         id: ObjectId,
@@ -767,3 +772,5 @@ impl VmCore {
         self.iterator_result(Value::UNDEFINED, true)
     }
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

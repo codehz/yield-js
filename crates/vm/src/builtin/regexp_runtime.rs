@@ -6,7 +6,7 @@ use crate::builtin::{RootKind, RootSpec, define_builtin_data, link_constructor};
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, ITERATOR_SYMBOL, Object, PlainObject};
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::regexp::{compile_pattern, encode_input, encode_input_with_flags, find_match};
 use crate::runtime::{Arguments, Invocation};
@@ -40,27 +40,31 @@ const REGEXP: IntrinsicKey = IntrinsicKey::new(members::NAME, Slot::Global, "");
 const ITERATOR_NEXT: IntrinsicKey =
     IntrinsicKey::new("RegExpStringIterator", Slot::Prototype, "next");
 
-pub(crate) const OWNER: Owner = Owner::new(
-    members::ROOT,
-    REGEXP_ROOTS,
-    &[
-        &[IntrinsicDef::constructor(
-            REGEXP,
-            2,
-            |vm, host, roots, args, _| vm.construct_regexp(host, roots, &args, None, true),
-            |vm, host, roots, args, prototype| {
-                vm.construct_regexp(host, roots, &args, prototype, false)
-            },
-        )],
-        members::INTRINSICS,
-        &[IntrinsicDef::call(
-            ITERATOR_NEXT,
-            0,
-            |vm, host, roots, _, receiver| vm.regexp_string_iterator_next(host, roots, receiver),
-        )],
-    ],
-    Some(install),
-);
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const OWNER: Owner<P> = Owner::new(
+        members::ROOT,
+        REGEXP_ROOTS,
+        &[
+            &[IntrinsicDef::constructor(
+                REGEXP,
+                2,
+                |vm, host, roots, args, _| vm.construct_regexp(host, roots, &args, None, true),
+                |vm, host, roots, args, prototype| {
+                    vm.construct_regexp(host, roots, &args, prototype, false)
+                },
+            )],
+            members::Globals::<P>::INTRINSICS,
+            &[IntrinsicDef::call(
+                ITERATOR_NEXT,
+                0,
+                |vm, host, roots, _, receiver| {
+                    vm.regexp_string_iterator_next(host, roots, receiver)
+                },
+            )],
+        ],
+        Some(install),
+    );
+}
 
 const REGEXP_ROOTS: &[RootSpec] = &[
     RootSpec::new(
@@ -182,9 +186,9 @@ impl VmCore {
         Ok(id)
     }
 
-    pub(crate) fn construct_regexp(
+    pub(crate) fn construct_regexp<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         prototype: Option<ObjectId>,
@@ -258,9 +262,9 @@ impl VmCore {
             .map(|id| Invocation::Value(Value::object(id)))
     }
 
-    pub(crate) fn call_regexp_method(
+    pub(crate) fn call_regexp_method<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         method: RegExpMethod,
         receiver: &Value,
@@ -375,9 +379,9 @@ impl VmCore {
         };
         Ok(Invocation::Value(value))
     }
-    fn regexp_symbol_match(
+    fn regexp_symbol_match<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         args: &[Value],
@@ -445,9 +449,9 @@ impl VmCore {
         self.array_result(results)
     }
 
-    fn regexp_symbol_match_all(
+    fn regexp_symbol_match_all<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         args: &[Value],
@@ -504,9 +508,9 @@ impl VmCore {
         Ok(Invocation::Value(Value::object(iterator)))
     }
 
-    fn regexp_string_iterator_next(
+    fn regexp_string_iterator_next<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
     ) -> Result<Invocation, VmError> {
@@ -577,9 +581,9 @@ impl VmCore {
         }
     }
 
-    fn regexp_symbol_replace(
+    fn regexp_symbol_replace<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         args: &[Value],
@@ -689,9 +693,9 @@ impl VmCore {
         }
     }
 
-    fn regexp_symbol_search(
+    fn regexp_symbol_search<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         args: &[Value],
@@ -744,9 +748,9 @@ impl VmCore {
         }
     }
 
-    fn regexp_symbol_split(
+    fn regexp_symbol_split<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         args: &[Value],
@@ -887,9 +891,9 @@ impl VmCore {
         clippy::too_many_arguments,
         reason = "Explicit active roots at a guest call boundary"
     )]
-    fn regexp_replace_results(
+    fn regexp_replace_results<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         string: &JsString,
         results: Vec<Value>,
@@ -997,9 +1001,9 @@ impl VmCore {
         Ok(Ok(JsString::from_units(out)))
     }
 
-    fn regexp_substitution(
+    fn regexp_substitution<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         replaced: &JsString,
         parts: &Substitution<'_>,
@@ -1109,9 +1113,9 @@ impl VmCore {
         Ok(Ok(JsString::from_units(out)))
     }
 
-    fn regexp_flags(
+    fn regexp_flags<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
     ) -> Result<Result<JsString, Value>, VmError> {
@@ -1124,9 +1128,9 @@ impl VmCore {
         self.coerce_string(host, roots, &flags)
     }
 
-    fn regexp_last_index(
+    fn regexp_last_index<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
     ) -> Result<Result<f64, Value>, VmError> {
@@ -1145,9 +1149,9 @@ impl VmCore {
         }
     }
 
-    fn regexp_set_last_index(
+    fn regexp_set_last_index<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         value: f64,
@@ -1167,9 +1171,9 @@ impl VmCore {
     }
 
     /// Reads `array[index]` for a match result or a named key such as `index`.
-    fn regexp_element(
+    fn regexp_element<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         array: ObjectId,
         key: &str,
@@ -1185,9 +1189,9 @@ impl VmCore {
         }
     }
 
-    fn regexp_capture(
+    fn regexp_capture<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         array: ObjectId,
         index: usize,
@@ -1195,9 +1199,9 @@ impl VmCore {
         self.regexp_element(host, roots, array, &index.to_string())
     }
 
-    fn regexp_string_property(
+    fn regexp_string_property<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         key: &str,
@@ -1209,9 +1213,9 @@ impl VmCore {
         }
     }
 
-    fn regexp_test(
+    fn regexp_test<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         id: ObjectId,
@@ -1232,9 +1236,9 @@ impl VmCore {
         }
     }
 
-    fn regexp_exec(
+    fn regexp_exec<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         id: ObjectId,
@@ -1244,9 +1248,9 @@ impl VmCore {
         self.regexp_exec_with_encoded(host, roots, receiver, id, input, None)
     }
 
-    fn regexp_exec_with_encoded(
+    fn regexp_exec_with_encoded<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         id: ObjectId,
@@ -1287,9 +1291,9 @@ impl VmCore {
         self.regexp_match_with_encoded(host, roots, id, input, encoded)
     }
 
-    fn regexp_match(
+    fn regexp_match<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         input: JsString,
@@ -1297,9 +1301,9 @@ impl VmCore {
         self.regexp_match_with_encoded(host, roots, id, input, None)
     }
 
-    fn regexp_match_with_encoded(
+    fn regexp_match_with_encoded<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         input: JsString,
@@ -1602,3 +1606,5 @@ fn push_hex_escape(out: &mut Vec<u16>, prefix: char, unit: u16) {
         }
     }
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

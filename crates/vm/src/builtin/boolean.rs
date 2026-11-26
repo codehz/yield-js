@@ -1,5 +1,7 @@
 #[yield_binding_macros::builtin_global(name = "Boolean", root = "boolean", kind = "constructor")]
 pub(crate) mod members {
+    pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);
+
     use crate::builtin::globals::Owner;
     use crate::builtin::roots::{RootKind, RootSpec};
     use crate::builtin::{FUNCTION_PARENT, OBJECT_PARENT, link_constructor};
@@ -13,32 +15,34 @@ pub(crate) mod members {
 
     const KEY: IntrinsicKey = IntrinsicKey::new(NAME, Slot::Global, "");
     const PROTOTYPE: &str = "boolean.prototype";
-    pub(crate) const OWNER: Owner = Owner::new(
-        ROOT,
-        &[
-            RootSpec::new(ROOT, RootKind::Native(KEY), FUNCTION_PARENT).fixed(PROTOTYPE),
-            RootSpec::new(PROTOTYPE, RootKind::Plain, OBJECT_PARENT),
-        ],
-        &[
-            &[IntrinsicDef::constructor(
-                KEY,
-                1,
-                |_, _, _, args, _| {
-                    Ok(Invocation::Value(Value::boolean(
-                        args.first().is_some_and(Value::truthy),
-                    )))
-                },
-                |vm, _, roots, args, prototype| {
-                    let result = vm.construct_object(&[Value::boolean(
-                        args.first().is_some_and(Value::truthy),
-                    )])?;
-                    vm.with_result_prototype(roots, result, prototype)
-                },
-            )],
-            INTRINSICS,
-        ],
-        Some(install),
-    );
+    impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+        pub(crate) const OWNER: Owner<P> = Owner::new(
+            ROOT,
+            &[
+                RootSpec::new(ROOT, RootKind::Native(KEY), FUNCTION_PARENT).fixed(PROTOTYPE),
+                RootSpec::new(PROTOTYPE, RootKind::Plain, OBJECT_PARENT),
+            ],
+            &[
+                &[IntrinsicDef::constructor(
+                    KEY,
+                    1,
+                    |_, _, _, args, _| {
+                        Ok(Invocation::Value(Value::boolean(
+                            args.first().is_some_and(Value::truthy),
+                        )))
+                    },
+                    |vm, _, roots, args, prototype| {
+                        let result = vm.construct_object(&[Value::boolean(
+                            args.first().is_some_and(Value::truthy),
+                        )])?;
+                        vm.with_result_prototype(roots, result, prototype)
+                    },
+                )],
+                Globals::<P>::INTRINSICS,
+            ],
+            Some(install),
+        );
+    }
 
     fn install(vm: &mut VmCore, _: &Value) {
         let constructor = vm.builtins.get(ROOT);

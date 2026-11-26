@@ -6,7 +6,7 @@ use super::globals::Owner;
 use super::roots::{RootKind, RootSpec};
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{JsString, Value};
@@ -14,15 +14,17 @@ use crate::vm::VmCore;
 
 macro_rules! function {
     ($owner:ident, $name:literal, $length:literal, $call:expr) => {
-        pub(super) const $owner: Owner = {
-            const KEY: IntrinsicKey = IntrinsicKey::new($name, Slot::Global, "");
-            Owner::new(
-                $name,
-                &[RootSpec::new($name, RootKind::Native(KEY), FUNCTION_PARENT)],
-                &[&[IntrinsicDef::call(KEY, $length, $call)]],
-                None,
-            )
-        };
+        impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+            pub(super) const $owner: Owner<P> = {
+                const KEY: IntrinsicKey = IntrinsicKey::new($name, Slot::Global, "");
+                Owner::new(
+                    $name,
+                    &[RootSpec::new($name, RootKind::Native(KEY), FUNCTION_PARENT)],
+                    &[&[IntrinsicDef::call(KEY, $length, $call)]],
+                    None,
+                )
+            };
+        }
     };
 }
 
@@ -67,9 +69,9 @@ function!(BTOA, "btoa", 1, |vm, host, roots, args, _| {
     call_base64(vm, host, roots, &args, encode_html_base64)
 });
 
-fn call_base64(
+fn call_base64<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: &[Value],
     transform: fn(&JsString) -> Option<JsString>,
@@ -91,9 +93,9 @@ fn call_base64(
     })
 }
 
-fn number_predicate(
+fn number_predicate<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: &[Value],
     predicate: fn(f64) -> bool,
@@ -129,9 +131,9 @@ function!(
     |vm, host, roots, args, _| { call_uri(vm, host, roots, &args, |text| decode(text, false)) }
 );
 
-fn call_uri(
+fn call_uri<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: &[Value],
     transform: impl FnOnce(JsString) -> Option<JsString>,
@@ -234,3 +236,5 @@ fn decode(text: JsString, preserve_reserved: bool) -> Option<JsString> {
         return Some(JsString::from_units(output));
     }
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

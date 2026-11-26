@@ -5,7 +5,8 @@ use sha2::{Digest, Sha256};
 use yield_vm::binding::HostFault;
 use yield_vm::host::{SubtleCryptoRequest, SubtleCryptoService};
 
-pub(crate) struct TestSubtleCrypto;
+#[derive(Clone)]
+pub struct TestSubtleCrypto;
 
 impl SubtleCryptoService for TestSubtleCrypto {
     fn execute(&self, request: SubtleCryptoRequest) -> Result<Vec<u8>, HostFault> {

@@ -9,7 +9,7 @@ use crate::heap::{
     ASYNC_DISPOSE_SYMBOL, Attributes, DISPOSE_SYMBOL, DisposableResource, DisposeHint,
     DisposeState, Object, ReactionJob,
 };
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::resolve::AwaitPrepared;
 use crate::runtime::{Arguments, Invocation, Settlement};
@@ -32,82 +32,88 @@ const fn scope_intrinsic(member: &'static str) -> IntrinsicKey {
 }
 
 // Operand order matches DisposeBuiltin. These have no global names.
-pub(crate) const SCOPE_INTRINSICS: [IntrinsicDef; DisposeBuiltin::COUNT] = [
-    IntrinsicDef::call(scope_intrinsic("newDisposeScope"), 0, |vm, _, _, _, _| {
-        let scope = vm.heap.alloc(Object::DisposeState(DisposeState::default()));
-        Ok(Invocation::Value(Value::object(scope)))
-    }),
-    IntrinsicDef::call(
-        scope_intrinsic("addResource"),
-        3,
-        |vm, host, roots, args, _| {
-            let scope = vm.disposal_scope_arg(&args)?;
-            let [_, value, async_] = args.as_slice() else {
-                return Err(VmError::InvalidState(
-                    "Expected resource registration arguments".into(),
-                ));
-            };
-            let ValueRef::Bool(async_) = async_.view() else {
-                return Err(VmError::InvalidState(
-                    "Expected resource registration hint".into(),
-                ));
-            };
-            match vm.create_disposable_resource(host, roots, value, async_)? {
-                Ok(record) => {
-                    vm.disposal(scope)?.records.extend(record);
-                    Ok(Invocation::Value(Value::UNDEFINED))
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const SCOPE_INTRINSICS: [IntrinsicDef<P>; DisposeBuiltin::COUNT] = [
+        IntrinsicDef::call(scope_intrinsic("newDisposeScope"), 0, |vm, _, _, _, _| {
+            let scope = vm.heap.alloc(Object::DisposeState(DisposeState::default()));
+            Ok(Invocation::Value(Value::object(scope)))
+        }),
+        IntrinsicDef::call(
+            scope_intrinsic("addResource"),
+            3,
+            |vm, host, roots, args, _| {
+                let scope = vm.disposal_scope_arg(&args)?;
+                let [_, value, async_] = args.as_slice() else {
+                    return Err(VmError::InvalidState(
+                        "Expected resource registration arguments".into(),
+                    ));
+                };
+                let ValueRef::Bool(async_) = async_.view() else {
+                    return Err(VmError::InvalidState(
+                        "Expected resource registration hint".into(),
+                    ));
+                };
+                match vm.create_disposable_resource(host, roots, value, async_)? {
+                    Ok(record) => {
+                        vm.disposal(scope)?.records.extend(record);
+                        Ok(Invocation::Value(Value::UNDEFINED))
+                    }
+                    Err(error) => Ok(Invocation::Thrown(error)),
                 }
-                Err(error) => Ok(Invocation::Thrown(error)),
-            }
-        },
-    ),
-    IntrinsicDef::call(
-        scope_intrinsic("stepDispose"),
-        1,
-        |vm, host, roots, args, _| {
-            let scope = vm.disposal_scope_arg(&args)?;
-            Ok(Invocation::Value(
-                match vm.step_disposal(host, roots, scope)? {
-                    DisposeStep::Done => Value::UNDEFINED,
-                    DisposeStep::Await(value) => vm.disposal_await_operand(host, roots, value)?,
-                },
-            ))
-        },
-    ),
-    IntrinsicDef::call(
-        scope_intrinsic("recordDisposeThrow"),
-        2,
-        |vm, _, _, args, _| {
-            let scope = vm.disposal_scope_arg(&args)?;
-            let error = args.into_iter().nth(1).unwrap_or(Value::UNDEFINED);
-            vm.record_disposal_error(scope, error)?;
-            Ok(Invocation::Value(Value::UNDEFINED))
-        },
-    ),
-    IntrinsicDef::call(
-        scope_intrinsic("hasDisposeThrow"),
-        1,
-        |vm, _, _, args, _| {
-            let scope = vm.disposal_scope_arg(&args)?;
-            Ok(Invocation::Value(Value::boolean(
-                vm.disposal(scope)?.error.is_some(),
-            )))
-        },
-    ),
-    IntrinsicDef::call(
-        scope_intrinsic("getDisposeThrow"),
-        1,
-        |vm, _, _, args, _| {
-            let scope = vm.disposal_scope_arg(&args)?;
-            Ok(Invocation::Value(
-                vm.disposal(scope)?.error.take().unwrap_or(Value::UNDEFINED),
-            ))
-        },
-    ),
-];
+            },
+        ),
+        IntrinsicDef::call(
+            scope_intrinsic("stepDispose"),
+            1,
+            |vm, host, roots, args, _| {
+                let scope = vm.disposal_scope_arg(&args)?;
+                Ok(Invocation::Value(
+                    match vm.step_disposal(host, roots, scope)? {
+                        DisposeStep::Done => Value::UNDEFINED,
+                        DisposeStep::Await(value) => {
+                            vm.disposal_await_operand(host, roots, value)?
+                        }
+                    },
+                ))
+            },
+        ),
+        IntrinsicDef::call(
+            scope_intrinsic("recordDisposeThrow"),
+            2,
+            |vm, _, _, args, _| {
+                let scope = vm.disposal_scope_arg(&args)?;
+                let error = args.into_iter().nth(1).unwrap_or(Value::UNDEFINED);
+                vm.record_disposal_error(scope, error)?;
+                Ok(Invocation::Value(Value::UNDEFINED))
+            },
+        ),
+        IntrinsicDef::call(
+            scope_intrinsic("hasDisposeThrow"),
+            1,
+            |vm, _, _, args, _| {
+                let scope = vm.disposal_scope_arg(&args)?;
+                Ok(Invocation::Value(Value::boolean(
+                    vm.disposal(scope)?.error.is_some(),
+                )))
+            },
+        ),
+        IntrinsicDef::call(
+            scope_intrinsic("getDisposeThrow"),
+            1,
+            |vm, _, _, args, _| {
+                let scope = vm.disposal_scope_arg(&args)?;
+                Ok(Invocation::Value(
+                    vm.disposal(scope)?.error.take().unwrap_or(Value::UNDEFINED),
+                ))
+            },
+        ),
+    ];
+}
 
 const fn scope_root(builtin: DisposeBuiltin) -> RootSpec {
-    let key = SCOPE_INTRINSICS[builtin as usize - DisposeBuiltin::NewScope as usize].key;
+    let key = BuiltinTable::<crate::host::Platform>::SCOPE_INTRINSICS
+        [builtin as usize - DisposeBuiltin::NewScope as usize]
+        .key;
     RootSpec::new(
         key.member,
         RootKind::Native(key),
@@ -137,9 +143,9 @@ impl VmCore {
         ))
     }
 
-    fn disposal_await_operand(
+    fn disposal_await_operand<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         value: Value,
     ) -> Result<Value, VmError> {
@@ -164,9 +170,9 @@ impl VmCore {
 }
 
 impl VmCore {
-    pub(crate) fn create_disposable_resource(
+    pub(crate) fn create_disposable_resource<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         value: &Value,
         async_: bool,
@@ -229,9 +235,9 @@ impl VmCore {
         Ok(())
     }
 
-    fn step_disposal(
+    fn step_disposal<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         state: ObjectId,
     ) -> Result<DisposeStep, VmError> {
@@ -312,9 +318,9 @@ impl VmCore {
         }
     }
 
-    pub(crate) fn dispose_records(
+    pub(crate) fn dispose_records<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         records: Vec<DisposableResource>,
         result: Option<ObjectId>,
@@ -347,9 +353,9 @@ impl VmCore {
         }
     }
 
-    fn drive_async_disposal(
+    fn drive_async_disposal<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         state: ObjectId,
         result: ObjectId,
@@ -382,9 +388,9 @@ impl VmCore {
         }
     }
 
-    pub(crate) fn resume_disposal(
+    pub(crate) fn resume_disposal<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         state: ObjectId,
         result: ObjectId,
@@ -397,3 +403,5 @@ impl VmCore {
         self.drive_async_disposal(host, roots, state, result)
     }
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

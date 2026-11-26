@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::VmError;
 use crate::gc::{ActiveRoots, TraceRoots, Tracer};
 use crate::heap::{Heap, ITERATOR_SYMBOL, Object, PlainObject};
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::runtime::{Arguments, Invocation};
 use crate::value::{JsBigInt, PropertyKeyRef, Value, ValueRef};
 use crate::vm::VmCore;
@@ -230,13 +230,13 @@ macro_rules! script {
     };
 }
 
-pub(super) struct Protocol<'a, 'r> {
+pub(super) struct Protocol<'a, 'r, P: PlatformServices> {
     pub(super) vm: &'a mut VmCore,
-    pub(super) host: &'a Host,
+    pub(super) host: &'a Host<P>,
     pub(super) roots: &'a ActiveRoots<'r>,
 }
 
-impl Protocol<'_, '_> {
+impl<P: PlatformServices> Protocol<'_, '_, P> {
     fn direct(&mut self, iterator: &Value) -> Result<Result<Record, Value>, VmError> {
         match self.vm.read_property(
             self.host,
@@ -319,9 +319,9 @@ impl Protocol<'_, '_> {
     }
 }
 
-pub(super) fn concat(
+pub(super) fn concat<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
 ) -> Result<Invocation, VmError> {
@@ -361,10 +361,10 @@ pub(super) fn concat(
     Ok(Invocation::Value(Value::object(id)))
 }
 
-pub(super) fn invoke(
+pub(super) fn invoke<P: PlatformServices>(
     method: Method,
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Arguments<'_>,
     receiver: &Value,
@@ -428,8 +428,8 @@ pub(super) fn invoke(
     consume(protocol, method, &outer, callback, args)
 }
 
-fn consume(
-    protocol: Protocol<'_, '_>,
+fn consume<P: PlatformServices>(
+    protocol: Protocol<'_, '_, P>,
     method: Method,
     outer: &Record,
     callback: &Value,
@@ -509,9 +509,9 @@ fn consume(
     }))
 }
 
-pub(super) fn resume(
+pub(super) fn resume<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     receiver: &Value,
     returning: bool,
@@ -562,8 +562,8 @@ pub(super) fn resume(
     }
 }
 
-fn advance_concat(
-    protocol: &mut Protocol<'_, '_>,
+fn advance_concat<P: PlatformServices>(
+    protocol: &mut Protocol<'_, '_, P>,
     cursor: &mut ConcatCursor,
 ) -> Result<Outcome, VmError> {
     loop {
@@ -598,8 +598,8 @@ fn advance_concat(
     }
 }
 
-fn close_concat(
-    protocol: &mut Protocol<'_, '_>,
+fn close_concat<P: PlatformServices>(
+    protocol: &mut Protocol<'_, '_, P>,
     cursor: &ConcatCursor,
 ) -> Result<Outcome, VmError> {
     let Some(record) = &cursor.current else {
@@ -615,7 +615,10 @@ fn close_concat(
     }
 }
 
-fn close_cursor(protocol: &mut Protocol<'_, '_>, cursor: &Cursor) -> Result<Outcome, VmError> {
+fn close_cursor<P: PlatformServices>(
+    protocol: &mut Protocol<'_, '_, P>,
+    cursor: &Cursor,
+) -> Result<Outcome, VmError> {
     // When closing an active flatMap, always close outer after inner, with
     // the first abrupt completion taking precedence.
     let mut completion = Invocation::Value(Value::UNDEFINED);
@@ -642,8 +645,8 @@ enum Outcome {
     Thrown(Value),
 }
 
-fn close_abrupt(
-    protocol: &mut Protocol<'_, '_>,
+fn close_abrupt<P: PlatformServices>(
+    protocol: &mut Protocol<'_, '_, P>,
     outer: &Record,
     error: Value,
 ) -> Result<Outcome, VmError> {
@@ -655,7 +658,10 @@ fn close_abrupt(
         })
 }
 
-fn advance(protocol: &mut Protocol<'_, '_>, cursor: &mut Cursor) -> Result<Outcome, VmError> {
+fn advance<P: PlatformServices>(
+    protocol: &mut Protocol<'_, '_, P>,
+    cursor: &mut Cursor,
+) -> Result<Outcome, VmError> {
     let outer = &cursor.outer;
     let edges = outer.values();
     let roots = &protocol.roots.with(&edges);

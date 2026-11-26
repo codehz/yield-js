@@ -12,7 +12,7 @@ use crate::error::VmError;
 use crate::exec::Hint;
 use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, Object, PlainObject, TO_PRIMITIVE_SYMBOL};
-use crate::host::{Host, TimeService};
+use crate::host::{Host, PlatformServices, TimeService};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{PropertyKeyRef, Value, ValueRef};
@@ -20,14 +20,14 @@ use crate::vm::VmCore;
 
 #[yield_binding_macros::builtin_global(name = "Date", root = "date", kind = "constructor")]
 mod members {
-    use super::{Invocation, Value, numeric_time};
+    use super::{Invocation, TimeService, Value, numeric_time};
 
     static_calls! {
-        now: 0 => |vm, _, _, _, _| Ok(Invocation::Value(Value::number(vm.time().now_ms() as f64)));
+        now: 0 => |_, host, _, _, _| Ok(Invocation::Value(Value::number(crate::builtin::time(host).now_ms() as f64)));
         parse: 1 => |vm, host, roots, args, _| {
             let roots = &roots.with(&args);
             let time = match vm.coerce_string(host, roots, args.first().unwrap_or(&Value::UNDEFINED))? {
-                Ok(string) => super::text::parse(&string, vm.time())?,
+                Ok(string) => super::text::parse(&string, &crate::builtin::time(host))?,
                 Err(error) => return Ok(Invocation::Thrown(error)),
             };
             Ok(numeric_time(time))
@@ -60,46 +60,48 @@ const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new(members::NAME, Slot::Global,
 const TO_PRIMITIVE: IntrinsicKey =
     IntrinsicKey::new(members::NAME, Slot::PrototypeSymbol, "toPrimitive");
 const PROTOTYPE: &str = "date.prototype";
-pub(crate) const OWNER: Owner = Owner::new(
-    members::ROOT,
-    &[
-        RootSpec::new(
-            members::ROOT,
-            RootKind::Native(CONSTRUCTOR),
-            FUNCTION_PARENT,
-        )
-        .fixed(PROTOTYPE),
-        RootSpec::new(PROTOTYPE, RootKind::Plain, OBJECT_PARENT),
-    ],
-    &[
-        &[IntrinsicDef::constructor_with_target(
-            CONSTRUCTOR,
-            7,
-            |vm, _, _, _, _| {
-                let clock = vm.time();
-                let now = clock.now_ms();
-                let text = text::format_local(now, clock, text::LocalPart::Full)?;
-                Ok(Invocation::Value(Value::string(text.into())))
-            },
-            construct_date,
-        )],
-        members::INTRINSICS,
-        &[IntrinsicDef::call(
-            TO_PRIMITIVE,
-            1,
-            |vm, host, roots, args, receiver| {
-                prototype::to_primitive(
-                    vm,
-                    host,
-                    roots,
-                    receiver,
-                    args.first().unwrap_or(&Value::UNDEFINED),
-                )
-            },
-        )],
-    ],
-    Some(install),
-);
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const OWNER: Owner<P> = Owner::new(
+        members::ROOT,
+        &[
+            RootSpec::new(
+                members::ROOT,
+                RootKind::Native(CONSTRUCTOR),
+                FUNCTION_PARENT,
+            )
+            .fixed(PROTOTYPE),
+            RootSpec::new(PROTOTYPE, RootKind::Plain, OBJECT_PARENT),
+        ],
+        &[
+            &[IntrinsicDef::constructor_with_target(
+                CONSTRUCTOR,
+                7,
+                |_, host, _, _, _| {
+                    let clock = crate::builtin::time(host);
+                    let now = clock.now_ms();
+                    let text = text::format_local(now, &clock, text::LocalPart::Full)?;
+                    Ok(Invocation::Value(Value::string(text.into())))
+                },
+                construct_date,
+            )],
+            members::Globals::<P>::INTRINSICS,
+            &[IntrinsicDef::call(
+                TO_PRIMITIVE,
+                1,
+                |vm, host, roots, args, receiver| {
+                    prototype::to_primitive(
+                        vm,
+                        host,
+                        roots,
+                        receiver,
+                        args.first().unwrap_or(&Value::UNDEFINED),
+                    )
+                },
+            )],
+        ],
+        Some(install),
+    );
+}
 
 fn install(vm: &mut VmCore, _: &Value) {
     let constructor = vm.builtins.get(members::ROOT);
@@ -124,16 +126,16 @@ fn install(vm: &mut VmCore, _: &Value) {
     );
 }
 
-fn construct_date(
+fn construct_date<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     new_target: &Value,
 ) -> Result<Invocation, VmError> {
     let roots = &roots.with(&args);
     let time = match args.as_slice() {
-        [] => Some(vm.time().now_ms()),
+        [] => Some(crate::builtin::time(host).now_ms()),
         [arg] => {
             if let ValueRef::Object(id) = arg.view()
                 && let Object::Date { time, .. } = vm.heap.get(id)?
@@ -145,7 +147,7 @@ fn construct_date(
                     Err(error) => return Ok(Invocation::Thrown(error)),
                 };
                 if let ValueRef::String(string) = primitive.view() {
-                    text::parse(string, vm.time())?
+                    text::parse(string, &crate::builtin::time(host))?
                 } else {
                     match vm.coerce_number(host, roots, &primitive)? {
                         Ok(number) => time_clip(number),
@@ -155,7 +157,7 @@ fn construct_date(
             }
         }
         _ => match calendar_arguments(vm, host, roots, &args)? {
-            Ok(time) => clip_local(time, vm.time())?,
+            Ok(time) => clip_local(time, &crate::builtin::time(host))?,
             Err(error) => return Ok(Invocation::Thrown(error)),
         },
     };
@@ -175,9 +177,9 @@ fn construct_date(
     ))))
 }
 
-fn calendar_arguments(
+fn calendar_arguments<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: &[Value],
 ) -> Result<Result<f64, Value>, VmError> {
@@ -204,7 +206,7 @@ fn full_year(year: f64) -> f64 {
     }
 }
 
-fn clip_local(time: f64, clock: &dyn TimeService) -> Result<Option<i64>, VmError> {
+fn clip_local(time: f64, clock: &impl TimeService) -> Result<Option<i64>, VmError> {
     if !time.is_finite() {
         return Ok(None);
     }
@@ -214,3 +216,5 @@ fn clip_local(time: f64, clock: &dyn TimeService) -> Result<Option<i64>, VmError
 fn numeric_time(time: Option<i64>) -> Invocation {
     Invocation::Value(Value::number(time.map_or(f64::NAN, |time| time as f64)))
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

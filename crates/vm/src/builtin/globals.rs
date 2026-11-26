@@ -20,22 +20,23 @@ use crate::builtin::{async_generator, error_family, generator, queue_family, sym
 use crate::error::VmError;
 use crate::exec;
 use crate::heap::{Attributes, DescriptorUpdate, HAS_INSTANCE_SYMBOL, TO_STRING_TAG_SYMBOL};
+use crate::host::{Platform, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::value::{PropertyKey, Value};
 use crate::vm::VmCore;
 
-pub(crate) struct Owner {
+pub(crate) struct Owner<P: PlatformServices> {
     root: &'static str,
     roots: &'static [RootSpec],
-    groups: &'static [&'static [IntrinsicDef]],
+    groups: &'static [&'static [IntrinsicDef<P>]],
     install: Option<fn(&mut VmCore, &Value)>,
 }
 
-impl Owner {
+impl<P: PlatformServices> Owner<P> {
     pub(crate) const fn new(
         root: &'static str,
         roots: &'static [RootSpec],
-        groups: &'static [&'static [IntrinsicDef]],
+        groups: &'static [&'static [IntrinsicDef<P>]],
         install: Option<fn(&mut VmCore, &Value)>,
     ) -> Self {
         Self {
@@ -47,9 +48,9 @@ impl Owner {
     }
 }
 
-enum Global {
-    Owner(Owner),
-    Function(Owner),
+enum Global<P: PlatformServices> {
+    Owner(Owner<P>),
+    Function(Owner<P>),
     Number(f64),
     /// A global whose object is an already allocated builtin root, used for a
     /// family of constructors that share one owner.
@@ -58,22 +59,19 @@ enum Global {
 }
 
 macro_rules! builtin_globals {
-    ($($name:expr => $global:expr),+ $(,)?) => {
-        const GLOBALS: &[Global] = &[$($global),+];
+    ($platform:ident; $($name:expr => $global:expr),+ $(,)?) => {
+        impl<$platform: PlatformServices> BuiltinTable<$platform> {
+            const GLOBALS: &[Global<$platform>] = &[$($global),+];
+        }
 
         /// VM-provided globals in bytecode operand order. Append; never reorder.
-        pub const BUILTINS: [&str; GLOBALS.len()] = [$($name),+];
+        pub const BUILTINS: [&str; BuiltinTable::<Platform>::GLOBALS.len()] = [$($name),+];
     };
 }
 
 // Foundational roots and non-global functions are not bytecode globals.
 const ITERATOR_IDENTITY: IntrinsicKey =
     IntrinsicKey::new("Iterator", Slot::PrototypeSymbol, "iterator");
-const ITERATOR_INTRINSICS: &[IntrinsicDef] = &[IntrinsicDef::call(
-    ITERATOR_IDENTITY,
-    0,
-    |_, _, _, _, receiver| Ok(crate::runtime::Invocation::Value(receiver.clone())),
-)];
 const GLOBAL_THIS: &str = "globalThis";
 const GLOBAL_THIS_ROOTS: &[RootSpec] = &[RootSpec::new(
     GLOBAL_THIS,
@@ -82,38 +80,39 @@ const GLOBAL_THIS_ROOTS: &[RootSpec] = &[RootSpec::new(
 )];
 
 builtin_globals! {
-    promise_members::NAME => Global::Owner(promise_members::OWNER),
-    "queueMicrotask" => Global::Owner(queue_family::OWNER),
-    "Error" => Global::Owner(error_family::ERROR),
-    "TypeError" => Global::Owner(error_family::TYPE_ERROR),
-    "Symbol" => Global::Owner(symbol_family::OWNER),
-    reflect_namespace::NAME => Global::Owner(reflect_namespace::OWNER),
-    object_members::NAME => Global::Owner(object_members::OWNER),
+    P;
+    promise_members::NAME => Global::Owner(promise_members::BuiltinTable::<P>::OWNER),
+    "queueMicrotask" => Global::Owner(queue_family::BuiltinTable::<P>::OWNER),
+    "Error" => Global::Owner(error_family::BuiltinTable::<P>::ERROR),
+    "TypeError" => Global::Owner(error_family::BuiltinTable::<P>::TYPE_ERROR),
+    "Symbol" => Global::Owner(symbol_family::BuiltinTable::<P>::OWNER),
+    reflect_namespace::NAME => Global::Owner(reflect_namespace::Globals::<P>::OWNER),
+    object_members::NAME => Global::Owner(object_members::BuiltinTable::<P>::OWNER),
     "NaN" => Global::Number(f64::NAN),
     "Infinity" => Global::Number(f64::INFINITY),
-    "Array" => Global::Owner(array::OWNER),
-    string::members::NAME => Global::Owner(string::OWNER),
-    "RangeError" => Global::Owner(error_family::RANGE_ERROR),
-    "ReferenceError" => Global::Owner(error_family::REFERENCE_ERROR),
-    "SyntaxError" => Global::Owner(error_family::SYNTAX_ERROR),
-    "EvalError" => Global::Owner(error_family::EVAL_ERROR),
-    "URIError" => Global::Owner(error_family::URI_ERROR),
-    "AggregateError" => Global::Owner(error_family::AGGREGATE_ERROR),
-    number::members::NAME => Global::Owner(number::OWNER),
-    math::NAME => Global::Owner(math::OWNER),
-    json::NAME => Global::Owner(json::OWNER),
-    "Map" => Global::Owner(collections::MAP_OWNER),
-    "Set" => Global::Owner(collections::SET_OWNER),
-    "WeakMap" => Global::Owner(collections::WEAK_MAP_OWNER),
-    "Proxy" => Global::Owner(proxy::OWNER),
-    "Boolean" => Global::Owner(boolean_family::OWNER),
+    "Array" => Global::Owner(array::BuiltinTable::<P>::OWNER),
+    string::members::NAME => Global::Owner(string::BuiltinTable::<P>::OWNER),
+    "RangeError" => Global::Owner(error_family::BuiltinTable::<P>::RANGE_ERROR),
+    "ReferenceError" => Global::Owner(error_family::BuiltinTable::<P>::REFERENCE_ERROR),
+    "SyntaxError" => Global::Owner(error_family::BuiltinTable::<P>::SYNTAX_ERROR),
+    "EvalError" => Global::Owner(error_family::BuiltinTable::<P>::EVAL_ERROR),
+    "URIError" => Global::Owner(error_family::BuiltinTable::<P>::URI_ERROR),
+    "AggregateError" => Global::Owner(error_family::BuiltinTable::<P>::AGGREGATE_ERROR),
+    number::members::NAME => Global::Owner(number::BuiltinTable::<P>::OWNER),
+    math::NAME => Global::Owner(math::Globals::<P>::OWNER),
+    json::NAME => Global::Owner(json::Globals::<P>::OWNER),
+    "Map" => Global::Owner(collections::BuiltinTable::<P>::MAP_OWNER),
+    "Set" => Global::Owner(collections::BuiltinTable::<P>::SET_OWNER),
+    "WeakMap" => Global::Owner(collections::BuiltinTable::<P>::WEAK_MAP_OWNER),
+    "Proxy" => Global::Owner(proxy::BuiltinTable::<P>::OWNER),
+    "Boolean" => Global::Owner(boolean_family::BuiltinTable::<P>::OWNER),
     GLOBAL_THIS => Global::Owner(Owner::new(GLOBAL_THIS, GLOBAL_THIS_ROOTS, &[], None)),
-    "RegExp" => Global::Owner(regexp::OWNER),
-    "WeakSet" => Global::Owner(collections::WEAK_SET_OWNER),
+    "RegExp" => Global::Owner(regexp::BuiltinTable::<P>::OWNER),
+    "WeakSet" => Global::Owner(collections::BuiltinTable::<P>::WEAK_SET_OWNER),
     "Function" => Global::Owner(Owner::new("function", &[], &[], None)),
-    "Date" => Global::Owner(date::OWNER),
-    bigint::members::NAME => Global::Owner(bigint::OWNER),
-    "ArrayBuffer" => Global::Owner(binary::OWNER),
+    "Date" => Global::Owner(date::BuiltinTable::<P>::OWNER),
+    bigint::members::NAME => Global::Owner(bigint::BuiltinTable::<P>::OWNER),
+    "ArrayBuffer" => Global::Owner(binary::BuiltinTable::<P>::OWNER),
     "DataView" => Global::Root("dataView"),
     "Int8Array" => Global::Root("int8Array"),
     "Uint8Array" => Global::Root("uint8Array"),
@@ -127,94 +126,143 @@ builtin_globals! {
     "Float64Array" => Global::Root("float64Array"),
     "BigInt64Array" => Global::Root("bigInt64Array"),
     "BigUint64Array" => Global::Root("bigUint64Array"),
-    "TextEncoder" => Global::Owner(binary::text::ENCODER_OWNER),
-    "TextDecoder" => Global::Owner(binary::text::DECODER_OWNER),
-    "TextEncoderStream" => Global::Owner(super::streams::text::ENCODER_OWNER),
-    "TextDecoderStream" => Global::Owner(super::streams::text::DECODER_OWNER),
-    "CompressionStream" => Global::Owner(super::streams::compression::ENCODER_OWNER),
-    "DecompressionStream" => Global::Owner(super::streams::compression::DECODER_OWNER),
-    "URL" => Global::Owner(super::url_api::URL_OWNER),
-    "URLSearchParams" => Global::Owner(super::url_api::params::PARAMS_OWNER),
-    "URLPattern" => Global::Owner(super::url_api::pattern::PATTERN_OWNER),
-    "Blob" => Global::Owner(super::fetch::blob::BLOB_OWNER),
-    "File" => Global::Owner(super::fetch::blob::FILE_OWNER),
-    "Headers" => Global::Owner(super::fetch::headers::HEADERS_OWNER),
-    "FormData" => Global::Owner(super::fetch::form_data::FORM_DATA_OWNER),
-    "Request" => Global::Owner(super::fetch::request::REQUEST_OWNER),
-    "Response" => Global::Owner(super::fetch::response::RESPONSE_OWNER),
-    "SuppressedError" => Global::Owner(error_family::SUPPRESSED_ERROR),
-    "DisposableStack" => Global::Owner(disposable_stack::SYNC_OWNER),
-    "AsyncDisposableStack" => Global::Owner(disposable_stack::ASYNC_OWNER),
-    "parseInt" => Global::Function(global_functions::PARSE_INT),
-    "parseFloat" => Global::Function(global_functions::PARSE_FLOAT),
-    "isNaN" => Global::Function(global_functions::IS_NAN),
-    "isFinite" => Global::Function(global_functions::IS_FINITE),
-    "encodeURI" => Global::Function(global_functions::ENCODE_URI),
-    "decodeURI" => Global::Function(global_functions::DECODE_URI),
-    "encodeURIComponent" => Global::Function(global_functions::ENCODE_URI_COMPONENT),
-    "decodeURIComponent" => Global::Function(global_functions::DECODE_URI_COMPONENT),
-    "eval" => Global::Function(global_functions::EVAL),
-    "Iterator" => Global::Function(super::iterator::OWNER),
-    "DOMException" => Global::Owner(super::dom_exception::OWNER),
-    "structuredClone" => Global::Function(super::structured_clone::OWNER),
-    "Event" => Global::Owner(super::event::OWNER),
+    "TextEncoder" => Global::Owner(binary::text::BuiltinTable::<P>::ENCODER_OWNER),
+    "TextDecoder" => Global::Owner(binary::text::BuiltinTable::<P>::DECODER_OWNER),
+    "TextEncoderStream" => Global::Owner(super::streams::text::BuiltinTable::<P>::ENCODER_OWNER),
+    "TextDecoderStream" => Global::Owner(super::streams::text::BuiltinTable::<P>::DECODER_OWNER),
+    "CompressionStream" => Global::Owner(super::streams::compression::BuiltinTable::<P>::ENCODER_OWNER),
+    "DecompressionStream" => Global::Owner(super::streams::compression::BuiltinTable::<P>::DECODER_OWNER),
+    "URL" => Global::Owner(super::url_api::BuiltinTable::<P>::URL_OWNER),
+    "URLSearchParams" => Global::Owner(super::url_api::params::BuiltinTable::<P>::PARAMS_OWNER),
+    "URLPattern" => Global::Owner(super::url_api::pattern::BuiltinTable::<P>::PATTERN_OWNER),
+    "Blob" => Global::Owner(super::fetch::blob::BuiltinTable::<P>::BLOB_OWNER),
+    "File" => Global::Owner(super::fetch::blob::BuiltinTable::<P>::FILE_OWNER),
+    "Headers" => Global::Owner(super::fetch::headers::BuiltinTable::<P>::HEADERS_OWNER),
+    "FormData" => Global::Owner(super::fetch::form_data::BuiltinTable::<P>::FORM_DATA_OWNER),
+    "Request" => Global::Owner(super::fetch::request::BuiltinTable::<P>::REQUEST_OWNER),
+    "Response" => Global::Owner(super::fetch::response::BuiltinTable::<P>::RESPONSE_OWNER),
+    "SuppressedError" => Global::Owner(error_family::BuiltinTable::<P>::SUPPRESSED_ERROR),
+    "DisposableStack" => Global::Owner(disposable_stack::sync::BuiltinTable::<P>::OWNER),
+    "AsyncDisposableStack" => Global::Owner(disposable_stack::asynchronous::BuiltinTable::<P>::OWNER),
+    "parseInt" => Global::Function(global_functions::BuiltinTable::<P>::PARSE_INT),
+    "parseFloat" => Global::Function(global_functions::BuiltinTable::<P>::PARSE_FLOAT),
+    "isNaN" => Global::Function(global_functions::BuiltinTable::<P>::IS_NAN),
+    "isFinite" => Global::Function(global_functions::BuiltinTable::<P>::IS_FINITE),
+    "encodeURI" => Global::Function(global_functions::BuiltinTable::<P>::ENCODE_URI),
+    "decodeURI" => Global::Function(global_functions::BuiltinTable::<P>::DECODE_URI),
+    "encodeURIComponent" => Global::Function(global_functions::BuiltinTable::<P>::ENCODE_URI_COMPONENT),
+    "decodeURIComponent" => Global::Function(global_functions::BuiltinTable::<P>::DECODE_URI_COMPONENT),
+    "eval" => Global::Function(global_functions::BuiltinTable::<P>::EVAL),
+    "Iterator" => Global::Function(super::iterator::BuiltinTable::<P>::OWNER),
+    "DOMException" => Global::Owner(super::dom_exception::BuiltinTable::<P>::OWNER),
+    "structuredClone" => Global::Function(super::structured_clone::BuiltinTable::<P>::OWNER),
+    "Event" => Global::Owner(super::event::BuiltinTable::<P>::OWNER),
     "CustomEvent" => Global::Root(super::event::CUSTOM_ROOT),
     "EventTarget" => Global::Root(super::event::TARGET_ROOT),
-    "AbortController" => Global::Owner(super::abort::CONTROLLER_OWNER),
-    "AbortSignal" => Global::Owner(super::abort::SIGNAL_OWNER),
+    "AbortController" => Global::Owner(super::abort::BuiltinTable::<P>::CONTROLLER_OWNER),
+    "AbortSignal" => Global::Owner(super::abort::BuiltinTable::<P>::SIGNAL_OWNER),
     "ErrorEvent" => Global::Root(super::event::ERROR_ROOT),
     "PromiseRejectionEvent" => Global::Root(super::event::PROMISE_REJECTION_ROOT),
-    "reportError" => Global::Function(global_functions::REPORT_ERROR),
-    "Performance" => Global::Owner(super::performance::OWNER),
+    "reportError" => Global::Function(global_functions::BuiltinTable::<P>::REPORT_ERROR),
+    "Performance" => Global::Owner(super::performance::BuiltinTable::<P>::OWNER),
     "performance" => Global::AccessorRoot(super::performance::INSTANCE),
-    "setTimeout" => Global::Owner(super::timers::SET_TIMEOUT),
-    "setInterval" => Global::Owner(super::timers::SET_INTERVAL),
-    "clearTimeout" => Global::Owner(super::timers::CLEAR_TIMEOUT),
-    "clearInterval" => Global::Owner(super::timers::CLEAR_INTERVAL),
-    "atob" => Global::Function(global_functions::ATOB),
-    "btoa" => Global::Function(global_functions::BTOA),
-    "CountQueuingStrategy" => Global::Owner(super::streams::COUNT_OWNER),
-    "ByteLengthQueuingStrategy" => Global::Owner(super::streams::BYTE_LENGTH_OWNER),
-    "ReadableStream" => Global::Owner(super::streams::STREAM_OWNER),
-    "ReadableStreamDefaultReader" => Global::Owner(super::streams::READER_OWNER),
-    "ReadableStreamDefaultController" => Global::Owner(super::streams::CONTROLLER_OWNER),
-    "ReadableByteStreamController" => Global::Owner(super::streams::BYTE_CONTROLLER_OWNER),
-    "ReadableStreamBYOBRequest" => Global::Owner(super::streams::BYOB_REQUEST_OWNER),
-    "ReadableStreamBYOBReader" => Global::Owner(super::streams::BYOB_READER_OWNER),
-    "WritableStream" => Global::Owner(super::streams::WRITABLE_OWNER),
-    "WritableStreamDefaultWriter" => Global::Owner(super::streams::WRITER_OWNER),
-    "WritableStreamDefaultController" => Global::Owner(super::streams::WRITABLE_CONTROLLER_OWNER),
-    "TransformStream" => Global::Owner(super::streams::TRANSFORM_OWNER),
-    "TransformStreamDefaultController" => Global::Owner(super::streams::TRANSFORM_CONTROLLER_OWNER),
-    "fetch" => Global::Function(super::fetch::controller::OWNER),
-    "console" => Global::Owner(super::console::OWNER),
+    "setTimeout" => Global::Owner(super::timers::BuiltinTable::<P>::SET_TIMEOUT),
+    "setInterval" => Global::Owner(super::timers::BuiltinTable::<P>::SET_INTERVAL),
+    "clearTimeout" => Global::Owner(super::timers::BuiltinTable::<P>::CLEAR_TIMEOUT),
+    "clearInterval" => Global::Owner(super::timers::BuiltinTable::<P>::CLEAR_INTERVAL),
+    "atob" => Global::Function(global_functions::BuiltinTable::<P>::ATOB),
+    "btoa" => Global::Function(global_functions::BuiltinTable::<P>::BTOA),
+    "CountQueuingStrategy" => Global::Owner(super::streams::strategy::BuiltinTable::<P>::COUNT_OWNER),
+    "ByteLengthQueuingStrategy" => Global::Owner(super::streams::strategy::BuiltinTable::<P>::BYTE_LENGTH_OWNER),
+    "ReadableStream" => Global::Owner(super::streams::readable::BuiltinTable::<P>::STREAM_OWNER),
+    "ReadableStreamDefaultReader" => Global::Owner(super::streams::readable::BuiltinTable::<P>::READER_OWNER),
+    "ReadableStreamDefaultController" => Global::Owner(super::streams::readable::BuiltinTable::<P>::CONTROLLER_OWNER),
+    "ReadableByteStreamController" => Global::Owner(super::streams::readable::bytes::BuiltinTable::<P>::BYTE_CONTROLLER_OWNER),
+    "ReadableStreamBYOBRequest" => Global::Owner(super::streams::readable::bytes::BuiltinTable::<P>::BYOB_REQUEST_OWNER),
+    "ReadableStreamBYOBReader" => Global::Owner(super::streams::readable::bytes::BuiltinTable::<P>::BYOB_READER_OWNER),
+    "WritableStream" => Global::Owner(super::streams::writable::BuiltinTable::<P>::WRITABLE_OWNER),
+    "WritableStreamDefaultWriter" => Global::Owner(super::streams::writable::BuiltinTable::<P>::WRITER_OWNER),
+    "WritableStreamDefaultController" => Global::Owner(super::streams::writable::BuiltinTable::<P>::WRITABLE_CONTROLLER_OWNER),
+    "TransformStream" => Global::Owner(super::streams::transform::BuiltinTable::<P>::TRANSFORM_OWNER),
+    "TransformStreamDefaultController" => Global::Owner(super::streams::transform::BuiltinTable::<P>::TRANSFORM_CONTROLLER_OWNER),
+    "fetch" => Global::Function(super::fetch::controller::BuiltinTable::<P>::OWNER),
+    "console" => Global::Owner(super::console::BuiltinTable::<P>::OWNER),
     "self" => Global::Root(GLOBAL_THIS),
-    "navigator" => Global::Owner(super::navigator::OWNER),
-    "crypto" => Global::Owner(super::crypto::OWNER),
-    "SubtleCrypto" => Global::Owner(super::crypto::SUBTLE_OWNER),
-    "CryptoKey" => Global::Owner(super::crypto::KEY_OWNER),
+    "navigator" => Global::Owner(super::navigator::BuiltinTable::<P>::OWNER),
+    "crypto" => Global::Owner(super::crypto::BuiltinTable::<P>::OWNER),
+    "SubtleCrypto" => Global::Owner(super::crypto::subtle::BuiltinTable::<P>::SUBTLE_OWNER),
+    "CryptoKey" => Global::Owner(super::crypto::subtle::BuiltinTable::<P>::KEY_OWNER),
 }
 
-fn owners() -> impl Iterator<Item = &'static Owner> {
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);
+
+impl<P: PlatformServices> BuiltinTable<P> {
+    const ITERATOR_INTRINSICS: &[IntrinsicDef<P>] = &[IntrinsicDef::call(
+        ITERATOR_IDENTITY,
+        0,
+        |_, _, _, _, receiver| Ok(crate::runtime::Invocation::Value(receiver.clone())),
+    )];
+
+    const FOUNDATIONAL: &'static [&'static [IntrinsicDef<P>]] = &[
+        exec::FunctionIntrinsics::<P>::INTRINSICS,
+        Self::ITERATOR_INTRINSICS,
+        super::iterator::BuiltinTable::<P>::INTRINSICS,
+        generator::BuiltinTable::<P>::INTRINSICS,
+        async_generator::BuiltinTable::<P>::INTRINSICS,
+        &super::disposal::BuiltinTable::<P>::SCOPE_INTRINSICS,
+        super::global_handlers::BuiltinTable::<P>::INTRINSICS,
+    ];
+
+    const GROUPS: [&'static [IntrinsicDef<P>]; GROUP_COUNT] = {
+        let mut groups: [&[IntrinsicDef<P>]; GROUP_COUNT] = [&[]; GROUP_COUNT];
+        let mut next = 0;
+        let mut global = 0;
+        while global < Self::GLOBALS.len() {
+            if let Global::Owner(owner) | Global::Function(owner) = &Self::GLOBALS[global] {
+                let mut group = 0;
+                while group < owner.groups.len() {
+                    groups[next] = owner.groups[group];
+                    next += 1;
+                    group += 1;
+                }
+            }
+            global += 1;
+        }
+        let mut group = 0;
+        while group < Self::FOUNDATIONAL.len() {
+            groups[next] = Self::FOUNDATIONAL[group];
+            next += 1;
+            group += 1;
+        }
+        groups
+    };
+
+    pub(crate) const fn groups() -> &'static [&'static [IntrinsicDef<P>]] {
+        &Self::GROUPS
+    }
+}
+
+const GROUP_COUNT: usize = {
+    let globals = BuiltinTable::<Platform>::GLOBALS;
+    let mut count = BuiltinTable::<Platform>::FOUNDATIONAL.len();
+    let mut i = 0;
+    while i < globals.len() {
+        if let Global::Owner(owner) | Global::Function(owner) = &globals[i] {
+            count += owner.groups.len();
+        }
+        i += 1;
+    }
+    count
+};
+
+fn owners() -> impl Iterator<Item = &'static Owner<Platform>> {
     GLOBALS.iter().filter_map(|global| match global {
         Global::Owner(owner) | Global::Function(owner) => Some(owner),
         Global::Number(_) | Global::Root(_) | Global::AccessorRoot(_) => None,
     })
 }
 
-pub(crate) fn intrinsic_groups() -> impl Iterator<Item = &'static [IntrinsicDef]> {
-    owners()
-        .flat_map(|owner| owner.groups.iter().copied())
-        .chain([
-            exec::FUNCTION_INTRINSICS,
-            ITERATOR_INTRINSICS,
-            super::iterator::INTRINSICS,
-            generator::INTRINSICS,
-            async_generator::INTRINSICS,
-            super::disposal::SCOPE_INTRINSICS.as_slice(),
-            super::global_handlers::INTRINSICS,
-        ])
-}
+const GLOBALS: &[Global<Platform>] = BuiltinTable::<Platform>::GLOBALS;
 
 pub(crate) fn root_groups() -> impl Iterator<Item = &'static [RootSpec]> {
     let (object, object_rest) = object_members::ROOTS.split_at(1);
@@ -244,7 +292,7 @@ pub(crate) fn root_groups() -> impl Iterator<Item = &'static [RootSpec]> {
 impl VmCore {
     pub(crate) fn builtin_value(&self, index: u32) -> Result<Value, VmError> {
         if let Some(offset) = crate::bytecode::DisposeBuiltin::offset(index) {
-            let key = super::disposal::SCOPE_INTRINSICS[offset].key;
+            let key = super::disposal::BuiltinTable::<Platform>::SCOPE_INTRINSICS[offset].key;
             return Ok(Value::object(self.builtins.get(key.member)));
         }
         match GLOBALS.get(index as usize) {
@@ -319,9 +367,12 @@ impl VmCore {
         }
         super::navigator::install(self, user_agent);
         for (root, tag) in [
-            (math::OWNER.root, "Math"),
-            (json::OWNER.root, "JSON"),
-            (reflect_namespace::OWNER.root, "Reflect"),
+            (math::Globals::<Platform>::OWNER.root, "Math"),
+            (json::Globals::<Platform>::OWNER.root, "JSON"),
+            (
+                reflect_namespace::Globals::<Platform>::OWNER.root,
+                "Reflect",
+            ),
             ("promise.prototype", "Promise"),
         ] {
             super::define_builtin_data(

@@ -8,7 +8,7 @@ use crate::gc::ActiveRoots;
 use crate::heap::{
     ClassElement, Object, PrivateElement, PrivateMember, PrivateMemberKind, ScriptClass,
 };
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::runtime::{Arguments, Invocation};
 use crate::value::{ObjectId, Value, ValueRef};
 use crate::vm::VmCore;
@@ -131,9 +131,9 @@ impl VmCore {
         Ok(())
     }
 
-    pub(crate) fn get_private(
+    pub(crate) fn get_private<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         brand: ObjectId,
@@ -163,9 +163,9 @@ impl VmCore {
         }
     }
 
-    pub(crate) fn set_private(
+    pub(crate) fn set_private<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         brand: ObjectId,

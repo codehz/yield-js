@@ -4,15 +4,15 @@ use crate::builtin::promise::members::THEN;
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{CombineKind, Object, PlainObject, PromiseCallback, ReactionJob, SPECIES_SYMBOL};
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::CallableTarget;
 use crate::runtime::{Arguments, Invocation, Microtask};
 use crate::value::{ObjectId, PropertyKeyRef, Value, ValueRef};
 use crate::vm::VmCore;
 impl VmCore {
-    pub(crate) fn construct_promise(
+    pub(crate) fn construct_promise<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: Vec<Value>,
         prototype: Option<ObjectId>,
@@ -67,9 +67,9 @@ impl VmCore {
                 if native.target() == CallableTarget::Intrinsic(*THEN_ID)))
     }
 
-    pub(crate) fn call_promise_static(
+    pub(crate) fn call_promise_static<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         name: &str,
@@ -135,9 +135,9 @@ impl VmCore {
         }
     }
 
-    pub(crate) fn call_promise_method(
+    pub(crate) fn call_promise_method<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         name: &str,
@@ -203,9 +203,9 @@ impl VmCore {
         }
     }
 
-    pub(crate) fn invoke_promise_then(
+    pub(crate) fn invoke_promise_then<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         args: Vec<Value>,
@@ -224,9 +224,9 @@ impl VmCore {
         }
     }
 
-    pub(crate) fn promise_species(
+    pub(crate) fn promise_species<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
     ) -> Result<Invocation, VmError> {
@@ -264,9 +264,9 @@ impl VmCore {
         }
     }
 
-    pub(crate) fn new_promise_capability(
+    pub(crate) fn new_promise_capability<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         species: &Value,
     ) -> Result<Result<(Value, Value, Value), Value>, VmError> {
@@ -321,9 +321,9 @@ impl VmCore {
         }))
     }
 
-    pub(crate) fn call_promise_callback(
+    pub(crate) fn call_promise_callback<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         args: Arguments<'_>,
@@ -391,9 +391,9 @@ impl VmCore {
         }
     }
 
-    pub(crate) fn promise_resolve_with(
+    pub(crate) fn promise_resolve_with<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         species: &Value,
         value: Value,
@@ -416,9 +416,9 @@ impl VmCore {
         self.call_promise_capability(host, roots, result, &resolve, value)
     }
 
-    pub(super) fn call_promise_capability(
+    pub(super) fn call_promise_capability<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         result: Value,
         callback: &Value,

@@ -8,9 +8,32 @@
 //! after the microtask checkpoint.
 
 use crate::heap::{Attributes, DescriptorUpdate};
+use crate::host::{DummyTimeService, Host, PlatformServices, TimeService};
 use crate::intrinsic::IntrinsicKey;
 use crate::value::{ObjectId, PropertyKey, Value};
 use crate::vm::VmCore;
+
+struct BuiltinTime<'a, T>(Option<&'a T>);
+
+impl<T: TimeService> TimeService for BuiltinTime<'_, T> {
+    fn now_ms(&self) -> i64 {
+        match self.0 {
+            Some(service) => service.now_ms(),
+            None => DummyTimeService.now_ms(),
+        }
+    }
+
+    fn time_zone(&self) -> std::borrow::Cow<'_, str> {
+        match self.0 {
+            Some(service) => service.time_zone(),
+            None => DummyTimeService.time_zone(),
+        }
+    }
+}
+
+fn time<P: PlatformServices>(host: &Host<P>) -> impl TimeService + '_ {
+    BuiltinTime(host.platform().time())
+}
 
 const OBJECT_PARENT: Option<&str> = Some("object.prototype");
 const FUNCTION_PARENT: Option<&str> = Some("function.prototype");

@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use sha2::{Digest, Sha256, Sha384, Sha512};
 use url::Url;
 
@@ -16,13 +14,14 @@ use crate::builtin::{
     roots::{RootKind, RootSpec},
 };
 use crate::error::VmError;
+use crate::fetch::FetchService;
 use crate::fetch::{
     CredentialsMode, FetchEvent, FetchFailure, FetchRegistration, HopRequest, Origin, ResponseHead,
     UploadBody,
 };
 use crate::gc::ActiveRoots;
 use crate::heap::{AbortStep, ElementKind, Object, ReactionJob};
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::{Invocation, Settlement};
 use crate::snapshot::OrdinaryTask;
@@ -34,28 +33,30 @@ const CREDIT: u64 = 64 * 1024;
 const INTERRUPTION: &str = "Restored fetch was interrupted";
 type Header = (Vec<u8>, Vec<u8>);
 
-pub(crate) const OWNER: Owner = Owner::new(
-    "fetch",
-    &[RootSpec::new(
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const OWNER: Owner<P> = Owner::new(
         "fetch",
-        RootKind::Native(KEY),
-        FUNCTION_PARENT,
-    )],
-    &[&[IntrinsicDef::call(KEY, 1, |vm, host, roots, args, _| {
-        let promise = vm.heap.alloc_promise();
-        let roots = &roots.with(&args);
-        let roots = &roots.with(&promise);
-        let undefined = Value::UNDEFINED;
-        let input = args.first().unwrap_or(&undefined);
-        let init = args.get(1).unwrap_or(&undefined);
-        match vm.request_from_fetch(host, roots, input, init)? {
-            Ok(request) => vm.begin_fetch(host, roots, promise, request)?,
-            Err(reason) => vm.settle(promise, Settlement::Rejected(reason))?,
-        }
-        Ok(Invocation::Value(Value::object(promise)))
-    })]],
-    None,
-);
+        &[RootSpec::new(
+            "fetch",
+            RootKind::Native(KEY),
+            FUNCTION_PARENT,
+        )],
+        &[&[IntrinsicDef::call(KEY, 1, |vm, host, roots, args, _| {
+            let promise = vm.heap.alloc_promise();
+            let roots = &roots.with(&args);
+            let roots = &roots.with(&promise);
+            let undefined = Value::UNDEFINED;
+            let input = args.first().unwrap_or(&undefined);
+            let init = args.get(1).unwrap_or(&undefined);
+            match vm.request_from_fetch(host, roots, input, init)? {
+                Ok(request) => vm.begin_fetch(host, roots, promise, request)?,
+                Err(reason) => vm.settle(promise, Settlement::Rejected(reason))?,
+            }
+            Ok(Invocation::Value(Value::object(promise)))
+        })]],
+        None,
+    );
+}
 
 fn base64(input: &[u8], url_safe: bool) -> Option<Vec<u8>> {
     let mut symbols = 0;
@@ -374,9 +375,9 @@ impl VmCore {
         Some(url.as_str().as_bytes().to_vec())
     }
 
-    fn begin_fetch(
+    fn begin_fetch<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         promise: ObjectId,
         request: ObjectId,
@@ -467,7 +468,7 @@ impl VmCore {
         if let Err(message) = self.configure_hop(&data, &mut hop) {
             return reject(self, message);
         }
-        if host.builtin_services().fetch().is_none() {
+        if host.platform().fetch().is_none() {
             return reject(self, "Fetch service unavailable");
         }
         let upload = match &data.body {
@@ -528,9 +529,9 @@ impl VmCore {
         )
     }
 
-    fn start_fetch_hop(
+    fn start_fetch_hop<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         mut tx: FetchTransaction,
         check_preflight: bool,
     ) -> Result<(), VmError> {
@@ -574,8 +575,8 @@ impl VmCore {
                 .push(AbortStep::Operation(id));
         }
         self.fetch_state.transactions.insert(id, tx);
-        let registration = host.builtin_services().fetch().and_then(|service| {
-            Arc::clone(service)
+        let registration = host.platform().fetch().and_then(|service| {
+            service
                 .start(
                     OperationToken {
                         epoch: self.epoch,
@@ -664,7 +665,10 @@ impl VmCore {
         Ok(())
     }
 
-    pub(crate) fn start_fetch_interruptions(&mut self, _host: &Host) -> Result<(), VmError> {
+    pub(crate) fn start_fetch_interruptions<P: PlatformServices>(
+        &mut self,
+        _host: &Host<P>,
+    ) -> Result<(), VmError> {
         for (&id, tx) in &mut self.fetch_state.transactions {
             if tx.is_external() && !tx.interruption_queued && !self.fetch_live.contains_key(&id) {
                 tx.interruption_queued = true;
@@ -750,7 +754,11 @@ impl VmCore {
         self.fetch_registration(id, |r| r.finish_upload())
     }
 
-    fn pump_fetch_upload(&mut self, host: &Host, id: u64) -> Result<(), VmError> {
+    fn pump_fetch_upload<P: PlatformServices>(
+        &mut self,
+        host: &Host<P>,
+        id: u64,
+    ) -> Result<(), VmError> {
         let Some(tx) = self.fetch_state.transactions.get_mut(&id) else {
             return Ok(());
         };
@@ -817,9 +825,9 @@ impl VmCore {
         }
     }
 
-    pub(crate) fn resume_fetch_upload(
+    pub(crate) fn resume_fetch_upload<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         id: u64,
         settlement: &Settlement,
     ) -> Result<(), VmError> {
@@ -858,9 +866,9 @@ impl VmCore {
         self.pump_fetch_upload(host, id)
     }
 
-    pub(crate) fn process_fetch_event(
+    pub(crate) fn process_fetch_event<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         id: u64,
         event: FetchEvent,
     ) -> Result<(), VmError> {
@@ -924,7 +932,12 @@ impl VmCore {
         }
     }
 
-    fn fetch_head(&mut self, host: &Host, id: u64, head: ResponseHead) -> Result<(), VmError> {
+    fn fetch_head<P: PlatformServices>(
+        &mut self,
+        host: &Host<P>,
+        id: u64,
+        head: ResponseHead,
+    ) -> Result<(), VmError> {
         let tx = &self.fetch_state.transactions[&id];
         if tx.preflight {
             if !preflight_allows(&tx.hop, &head) {
@@ -1003,9 +1016,9 @@ impl VmCore {
         self.grant_fetch_download(id, CREDIT)
     }
 
-    fn restart_fetch(
+    fn restart_fetch<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         id: u64,
         redirect: Option<(Url, bool)>,
     ) -> Result<(), VmError> {
@@ -1160,7 +1173,7 @@ impl VmCore {
         self.settle(promise, Settlement::Fulfilled(Value::object(response)))
     }
 
-    fn fetch_eof(&mut self, host: &Host, id: u64) -> Result<(), VmError> {
+    fn fetch_eof<P: PlatformServices>(&mut self, host: &Host<P>, id: u64) -> Result<(), VmError> {
         let tx = self.fetch_state.transactions.get_mut(&id).unwrap();
         if let Some(bytes) = tx.buffer.take() {
             let head = tx.head.clone().expect("final head processed before EOF");
@@ -1190,3 +1203,5 @@ impl VmCore {
         Ok(())
     }
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

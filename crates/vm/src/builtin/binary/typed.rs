@@ -18,7 +18,7 @@ use crate::heap::{
     ArrayIterationKind, Attributes, ITERATOR_SYMBOL, Object, TO_STRING_TAG_SYMBOL,
     TypedArrayObject, ViewRange,
 };
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::ops;
 use crate::runtime::{Arguments, Invocation};
@@ -44,94 +44,96 @@ const KEYS: IntrinsicKey = IntrinsicKey::new("TypedArray", Slot::Prototype, "key
 
 macro_rules! members {
     ($($name:literal : $length:literal),+ $(,)?) => {
-        pub(super) const INTRINSICS: &[IntrinsicDef] = &[
-            IntrinsicDef::constructor(
-                TYPED_ARRAY,
-                0,
-                |vm, _, roots, _, _| vm.throw_type_error(roots, "%TypedArray% is not directly callable"),
-                |vm, _, roots, _, _| {
-                    vm.throw_type_error(roots, "%TypedArray% is not directly constructable")
-                },
-            ),
-            IntrinsicDef::call(FROM, 1, |vm, host, roots, args, receiver| {
-                vm.typed_from(host, roots, receiver, &args)
-            }),
-            IntrinsicDef::call(OF, 0, |vm, host, roots, args, receiver| {
-                vm.typed_of(host, roots, receiver, args)
-            }),
-            IntrinsicDef::call(SPECIES, 0, |_, _, _, _, receiver| {
-                Ok(Invocation::Value(receiver.clone()))
-            }),
-            IntrinsicDef::call(BUFFER, 0, |vm, _, roots, _, receiver| {
-                vm.typed_record(roots, receiver, |view| Value::object(view.buffer))
-            }),
-            IntrinsicDef::call(BYTE_LENGTH, 0, |vm, _, roots, _, receiver| {
-                vm.typed_byte_length(roots, receiver)
-            }),
-            IntrinsicDef::call(BYTE_OFFSET, 0, |vm, _, roots, _, receiver| {
-                vm.typed_byte_offset(roots, receiver)
-            }),
-            IntrinsicDef::call(LENGTH, 0, |vm, _, roots, _, receiver| vm.typed_length(roots, receiver)),
-            IntrinsicDef::call(TO_STRING_TAG, 0, |vm, _, _, _, receiver| {
-                Ok(Invocation::Value(match receiver.view() {
-                    ValueRef::Object(id) => match vm.heap.typed_array(id)? {
-                        Some(view) => Value::string(view.kind.name().into()),
-                        None => Value::UNDEFINED,
-                    },
-                    _ => Value::UNDEFINED,
-                }))
-            }),
-            IntrinsicDef::call(VALUES, 0, |vm, _, roots, _, receiver| {
-                vm.typed_iterator(roots, receiver, ArrayIterationKind::Values)
-            }),
-            IntrinsicDef::call(ENTRIES, 0, |vm, _, roots, _, receiver| {
-                vm.typed_iterator(roots, receiver, ArrayIterationKind::Entries)
-            }),
-            IntrinsicDef::call(KEYS, 0, |vm, _, roots, _, receiver| {
-                vm.typed_iterator(roots, receiver, ArrayIterationKind::Keys)
-            }),
-            $(
-                IntrinsicDef::call(
-                    IntrinsicKey::new("TypedArray", Slot::Prototype, $name),
-                    $length,
-                    |vm, host, roots, args, receiver| {
-                        vm.typed_method(host, roots, $name, receiver, &args)
+        impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+            pub(super) const INTRINSICS: &[IntrinsicDef<P>] = &[
+                IntrinsicDef::constructor(
+                    TYPED_ARRAY,
+                    0,
+                    |vm, _, roots, _, _| vm.throw_type_error(roots, "%TypedArray% is not directly callable"),
+                    |vm, _, roots, _, _| {
+                        vm.throw_type_error(roots, "%TypedArray% is not directly constructable")
                     },
                 ),
-            )+
-            IntrinsicDef::call(
-                IntrinsicKey::new("Uint8Array", Slot::Static, "fromBase64"),
-                1,
-                |vm, host, roots, args, _| vm.uint8_from_base64(host, roots, &args),
-            ),
-            IntrinsicDef::call(
-                IntrinsicKey::new("Uint8Array", Slot::Static, "fromHex"),
-                1,
-                |vm, host, roots, args, _| vm.uint8_from_hex(host, roots, &args),
-            ),
-            IntrinsicDef::call(
-                IntrinsicKey::new("Uint8Array", Slot::Prototype, "setFromBase64"),
-                1,
-                |vm, host, roots, args, receiver| {
-                    vm.uint8_set_from_base64(host, roots, receiver, &args)
-                },
-            ),
-            IntrinsicDef::call(
-                IntrinsicKey::new("Uint8Array", Slot::Prototype, "setFromHex"),
-                1,
-                |vm, _, roots, args, receiver| vm.uint8_set_from_hex(roots, receiver, &args),
-            ),
-            IntrinsicDef::call(
-                IntrinsicKey::new("Uint8Array", Slot::Prototype, "toBase64"),
-                0,
-                |vm, host, roots, args, receiver| vm.uint8_to_base64(host, roots, receiver, &args),
-            ),
-            IntrinsicDef::call(
-                IntrinsicKey::new("Uint8Array", Slot::Prototype, "toHex"),
-                0,
-                |vm, _, roots, _, receiver| vm.uint8_to_hex(roots, receiver),
-            ),
-        ];
+                IntrinsicDef::call(FROM, 1, |vm, host, roots, args, receiver| {
+                    vm.typed_from(host, roots, receiver, &args)
+                }),
+                IntrinsicDef::call(OF, 0, |vm, host, roots, args, receiver| {
+                    vm.typed_of(host, roots, receiver, args)
+                }),
+                IntrinsicDef::call(SPECIES, 0, |_, _, _, _, receiver| {
+                    Ok(Invocation::Value(receiver.clone()))
+                }),
+                IntrinsicDef::call(BUFFER, 0, |vm, _, roots, _, receiver| {
+                    vm.typed_record(roots, receiver, |view| Value::object(view.buffer))
+                }),
+                IntrinsicDef::call(BYTE_LENGTH, 0, |vm, _, roots, _, receiver| {
+                    vm.typed_byte_length(roots, receiver)
+                }),
+                IntrinsicDef::call(BYTE_OFFSET, 0, |vm, _, roots, _, receiver| {
+                    vm.typed_byte_offset(roots, receiver)
+                }),
+                IntrinsicDef::call(LENGTH, 0, |vm, _, roots, _, receiver| vm.typed_length(roots, receiver)),
+                IntrinsicDef::call(TO_STRING_TAG, 0, |vm, _, _, _, receiver| {
+                    Ok(Invocation::Value(match receiver.view() {
+                        ValueRef::Object(id) => match vm.heap.typed_array(id)? {
+                            Some(view) => Value::string(view.kind.name().into()),
+                            None => Value::UNDEFINED,
+                        },
+                        _ => Value::UNDEFINED,
+                    }))
+                }),
+                IntrinsicDef::call(VALUES, 0, |vm, _, roots, _, receiver| {
+                    vm.typed_iterator(roots, receiver, ArrayIterationKind::Values)
+                }),
+                IntrinsicDef::call(ENTRIES, 0, |vm, _, roots, _, receiver| {
+                    vm.typed_iterator(roots, receiver, ArrayIterationKind::Entries)
+                }),
+                IntrinsicDef::call(KEYS, 0, |vm, _, roots, _, receiver| {
+                    vm.typed_iterator(roots, receiver, ArrayIterationKind::Keys)
+                }),
+                $(
+                    IntrinsicDef::call(
+                        IntrinsicKey::new("TypedArray", Slot::Prototype, $name),
+                        $length,
+                        |vm, host, roots, args, receiver| {
+                            vm.typed_method(host, roots, $name, receiver, &args)
+                        },
+                    ),
+                )+
+                IntrinsicDef::call(
+                    IntrinsicKey::new("Uint8Array", Slot::Static, "fromBase64"),
+                    1,
+                    |vm, host, roots, args, _| vm.uint8_from_base64(host, roots, &args),
+                ),
+                IntrinsicDef::call(
+                    IntrinsicKey::new("Uint8Array", Slot::Static, "fromHex"),
+                    1,
+                    |vm, host, roots, args, _| vm.uint8_from_hex(host, roots, &args),
+                ),
+                IntrinsicDef::call(
+                    IntrinsicKey::new("Uint8Array", Slot::Prototype, "setFromBase64"),
+                    1,
+                    |vm, host, roots, args, receiver| {
+                        vm.uint8_set_from_base64(host, roots, receiver, &args)
+                    },
+                ),
+                IntrinsicDef::call(
+                    IntrinsicKey::new("Uint8Array", Slot::Prototype, "setFromHex"),
+                    1,
+                    |vm, _, roots, args, receiver| vm.uint8_set_from_hex(roots, receiver, &args),
+                ),
+                IntrinsicDef::call(
+                    IntrinsicKey::new("Uint8Array", Slot::Prototype, "toBase64"),
+                    0,
+                    |vm, host, roots, args, receiver| vm.uint8_to_base64(host, roots, receiver, &args),
+                ),
+                IntrinsicDef::call(
+                    IntrinsicKey::new("Uint8Array", Slot::Prototype, "toHex"),
+                    0,
+                    |vm, _, roots, _, receiver| vm.uint8_to_hex(roots, receiver),
+                ),
+            ];
+        }
 
         /// Shared members live on `%TypedArray%.prototype` only; concrete
         /// prototypes inherit them.
@@ -234,9 +236,9 @@ pub(super) fn install(vm: &mut VmCore) {
 }
 
 /// `%TypedArray%.prototype` is not callable as a constructor.
-pub(super) fn call_requires_new(
+pub(super) fn call_requires_new<P: PlatformServices>(
     vm: &mut VmCore,
-    _: &Host,
+    _: &Host<P>,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     _: &Value,
@@ -252,9 +254,9 @@ struct MapFn<'a> {
 }
 
 /// The 23.2.5.1 `TypedArray (...args)` dispatch for one element kind.
-pub(super) fn construct(
+pub(super) fn construct<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     new_target: &Value,
@@ -326,9 +328,9 @@ impl VmCore {
     /// AllocateTypedArray plus AllocateTypedArrayBuffer in one step: the object
     /// and its buffer are always created together here, so no view ever names a
     /// buffer that does not exist.
-    fn allocate_typed(
+    fn allocate_typed<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         kind: ElementKind,
         new_target: &Value,
@@ -389,9 +391,9 @@ impl VmCore {
 
     /// InitializeTypedArrayFromTypedArray: always a fresh buffer, so the copy is
     /// never observable through the source.
-    fn init_from_typed_array(
+    fn init_from_typed_array<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         object: ObjectId,
         source: &Value,
@@ -451,9 +453,9 @@ impl VmCore {
     }
 
     /// InitializeTypedArrayFromArrayBuffer.
-    fn init_from_array_buffer(
+    fn init_from_array_buffer<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         object: ObjectId,
         buffer_value: &Value,
@@ -556,9 +558,9 @@ impl VmCore {
     }
 
     /// InitializeTypedArrayFromElements: iterable first, then array-like.
-    fn init_from_elements(
+    fn init_from_elements<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         object: ObjectId,
         source: &Value,
@@ -625,9 +627,9 @@ impl VmCore {
     }
 
     /// IteratorToList over an explicit `@@iterator` method.
-    pub(crate) fn iterator_to_list(
+    pub(crate) fn iterator_to_list<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         iterable: &Value,
         method: &Value,
@@ -747,9 +749,9 @@ impl VmCore {
     }
 
     /// TypedArrayCreateSameType: always the intrinsic constructor of the kind.
-    fn same_type_create(
+    fn same_type_create<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         length: usize,
@@ -767,9 +769,9 @@ impl VmCore {
 
     /// TypedArraySpeciesCreate: the exemplar's species, then a brand and
     /// content-type check on whatever it built.
-    fn species_create(
+    fn species_create<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         args: Vec<Value>,
@@ -791,9 +793,9 @@ impl VmCore {
 
     /// TypedArrayCreateFromConstructor: the result must be a TypedArray of the
     /// right content type and at least the requested length.
-    fn typed_create_from_constructor(
+    fn typed_create_from_constructor<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         constructor: &Value,
         args: Vec<Value>,
@@ -957,9 +959,9 @@ impl VmCore {
         clippy::too_many_lines,
         reason = "One dispatch over the shared prototype member table"
     )]
-    pub(super) fn typed_method(
+    pub(super) fn typed_method<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         name: &'static str,
         receiver: &Value,
@@ -1035,9 +1037,9 @@ enum Search {
 }
 
 impl VmCore {
-    fn typed_at(
+    fn typed_at<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         length: usize,
@@ -1053,9 +1055,9 @@ impl VmCore {
         Ok(Ok(self.element_value(id, index as u64)?))
     }
 
-    fn typed_copy_within(
+    fn typed_copy_within<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         kind: ElementKind,
@@ -1108,9 +1110,9 @@ impl VmCore {
         Ok(Ok(Value::object(id)))
     }
 
-    fn typed_fill(
+    fn typed_fill<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         kind: ElementKind,
@@ -1160,9 +1162,9 @@ impl VmCore {
         Ok(Ok(Value::object(id)))
     }
 
-    fn typed_predicate(
+    fn typed_predicate<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         length: usize,
@@ -1231,9 +1233,9 @@ impl VmCore {
         }))
     }
 
-    fn typed_search(
+    fn typed_search<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         length: usize,
@@ -1317,9 +1319,9 @@ impl VmCore {
         })
     }
 
-    fn typed_join(
+    fn typed_join<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         length: usize,
@@ -1347,9 +1349,9 @@ impl VmCore {
         Ok(Ok(Value::string(out.into())))
     }
 
-    fn typed_locale_string(
+    fn typed_locale_string<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         length: usize,
@@ -1392,9 +1394,9 @@ impl VmCore {
         Ok(Ok(Value::string(out.into())))
     }
 
-    fn typed_map(
+    fn typed_map<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         length: usize,
@@ -1442,9 +1444,9 @@ impl VmCore {
         Ok(Ok(Value::object(result)))
     }
 
-    fn typed_filter(
+    fn typed_filter<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         length: usize,
@@ -1498,9 +1500,9 @@ impl VmCore {
         Ok(Ok(Value::object(result)))
     }
 
-    fn typed_reduce(
+    fn typed_reduce<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         length: usize,
@@ -1588,9 +1590,9 @@ impl VmCore {
         }
     }
 
-    fn typed_set(
+    fn typed_set<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         kind: ElementKind,
@@ -1622,9 +1624,9 @@ impl VmCore {
         }
     }
 
-    fn set_from_typed(
+    fn set_from_typed<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
         kind: ElementKind,
@@ -1722,9 +1724,9 @@ impl VmCore {
         Ok(Ok(()))
     }
 
-    fn set_from_array_like(
+    fn set_from_array_like<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
         offset: f64,
@@ -1779,9 +1781,9 @@ impl VmCore {
         Ok(Ok(()))
     }
 
-    fn typed_slice(
+    fn typed_slice<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         kind: ElementKind,
@@ -1843,9 +1845,9 @@ impl VmCore {
         Ok(Ok(Value::object(result)))
     }
 
-    fn typed_subarray(
+    fn typed_subarray<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         kind: ElementKind,
@@ -1902,9 +1904,9 @@ impl VmCore {
         }
     }
 
-    fn typed_to_reversed(
+    fn typed_to_reversed<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         length: usize,
@@ -1932,9 +1934,9 @@ impl VmCore {
         Ok(Ok(Value::object(result)))
     }
 
-    fn typed_with(
+    fn typed_with<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         length: usize,
@@ -1988,9 +1990,9 @@ impl VmCore {
         Ok(Ok(Value::object(result)))
     }
 
-    fn typed_sort(
+    fn typed_sort<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         length: usize,
@@ -2039,9 +2041,9 @@ impl VmCore {
 
     /// SortIndexedProperties with `CompareTypedArrayElements`: a stable sort
     /// whose comparator may run script code.
-    fn sort_items(
+    fn sort_items<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         items: &mut [Value],
         comparator: &Value,
@@ -2098,9 +2100,9 @@ impl VmCore {
     }
 
     /// CompareTypedArrayElements: numeric order with NaN last and -0 before +0.
-    fn compare_elements(
+    fn compare_elements<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         x: &Value,
         y: &Value,
@@ -2171,9 +2173,9 @@ impl VmCore {
             .map_or(0, |view| view.byte_offset))
     }
 
-    fn typed_from(
+    fn typed_from<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         args: &[Value],
@@ -2202,9 +2204,9 @@ impl VmCore {
         })
     }
 
-    fn typed_from_impl(
+    fn typed_from_impl<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         constructor: &Value,
         source: &Value,
@@ -2316,9 +2318,9 @@ impl VmCore {
         Ok(Ok(Value::object(target)))
     }
 
-    fn typed_of(
+    fn typed_of<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         args: Vec<Value>,
@@ -2334,9 +2336,9 @@ impl VmCore {
         })
     }
 
-    fn typed_of_impl(
+    fn typed_of_impl<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         constructor: &Value,
         items: &[Value],
@@ -2381,3 +2383,5 @@ fn same_value_zero(lhs: &Value, rhs: &Value) -> bool {
         _ => ops::strict_equal(lhs, rhs),
     }
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

@@ -8,7 +8,7 @@ use crate::builtin::roots::{RootKind, RootSpec};
 use crate::builtin::{FUNCTION_PARENT, OBJECT_PARENT};
 use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, Object, PlainObject};
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{PropertyKeyRef, Value, ValueRef};
@@ -16,48 +16,58 @@ use crate::vm::VmCore;
 
 macro_rules! strategy {
     ($owner:ident, $root:literal, $name:literal, $byte_length:literal, $length:literal, $size:expr) => {
-        pub(in crate::builtin) const $owner: Owner = {
-            const PROTOTYPE: &str = concat!($root, ".prototype");
-            const SHARED_SIZE: &str = concat!($root, ".size");
-            const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new($name, Slot::Global, "");
-            const SIZE: IntrinsicKey = IntrinsicKey::new($name, Slot::Prototype, "size");
-            const MEMBERS: &[IntrinsicDef] = &[
-                IntrinsicDef::constructor_with_target(
-                    CONSTRUCTOR,
-                    1,
-                    |vm, _, roots, _, _| {
-                        vm.throw_type_error(roots, concat!($name, " requires new"))
-                    },
-                    |vm, host, roots, args, target| {
-                        construct(vm, host, roots, args, target, PROTOTYPE, $byte_length)
-                    },
-                ),
-                IntrinsicDef::call(
-                    IntrinsicKey::new($name, Slot::PrototypeGetter, "highWaterMark"),
-                    0,
-                    |vm, _, roots, _, receiver| get(vm, roots, receiver, $byte_length, None),
-                ),
-                IntrinsicDef::call(
-                    IntrinsicKey::new($name, Slot::PrototypeGetter, "size"),
-                    0,
-                    |vm, _, roots, _, receiver| {
-                        get(vm, roots, receiver, $byte_length, Some(SHARED_SIZE))
-                    },
-                ),
-            ];
-            Owner::new(
-                $root,
-                &[
-                    RootSpec::new($root, RootKind::Native(CONSTRUCTOR), FUNCTION_PARENT)
-                        .fixed(PROTOTYPE)
-                        .backlink(Some(Attributes::METHOD)),
-                    RootSpec::new(PROTOTYPE, RootKind::Plain, OBJECT_PARENT),
-                    RootSpec::new(SHARED_SIZE, RootKind::Native(SIZE), FUNCTION_PARENT),
-                ],
-                &[MEMBERS, &[IntrinsicDef::call(SIZE, $length, $size)]],
-                Some(|vm, _| install(vm, $name, $root, PROTOTYPE, MEMBERS)),
-            )
-        };
+        impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+            pub(in crate::builtin) const $owner: Owner<P> = {
+                const PROTOTYPE: &str = concat!($root, ".prototype");
+                const SHARED_SIZE: &str = concat!($root, ".size");
+                const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new($name, Slot::Global, "");
+                const SIZE: IntrinsicKey = IntrinsicKey::new($name, Slot::Prototype, "size");
+                struct LocalMembers<P>(std::marker::PhantomData<P>);
+                impl<P: crate::host::PlatformServices> LocalMembers<P> {
+                    const MEMBERS: &[IntrinsicDef<P>] = &[
+                        IntrinsicDef::constructor_with_target(
+                            CONSTRUCTOR,
+                            1,
+                            |vm, _, roots, _, _| {
+                                vm.throw_type_error(roots, concat!($name, " requires new"))
+                            },
+                            |vm, host, roots, args, target| {
+                                construct(vm, host, roots, args, target, PROTOTYPE, $byte_length)
+                            },
+                        ),
+                        IntrinsicDef::call(
+                            IntrinsicKey::new($name, Slot::PrototypeGetter, "highWaterMark"),
+                            0,
+                            |vm, _, roots, _, receiver| {
+                                get(vm, roots, receiver, $byte_length, None)
+                            },
+                        ),
+                        IntrinsicDef::call(
+                            IntrinsicKey::new($name, Slot::PrototypeGetter, "size"),
+                            0,
+                            |vm, _, roots, _, receiver| {
+                                get(vm, roots, receiver, $byte_length, Some(SHARED_SIZE))
+                            },
+                        ),
+                    ];
+                }
+                Owner::new(
+                    $root,
+                    &[
+                        RootSpec::new($root, RootKind::Native(CONSTRUCTOR), FUNCTION_PARENT)
+                            .fixed(PROTOTYPE)
+                            .backlink(Some(Attributes::METHOD)),
+                        RootSpec::new(PROTOTYPE, RootKind::Plain, OBJECT_PARENT),
+                        RootSpec::new(SHARED_SIZE, RootKind::Native(SIZE), FUNCTION_PARENT),
+                    ],
+                    &[
+                        LocalMembers::<P>::MEMBERS,
+                        &[IntrinsicDef::call(SIZE, $length, $size)],
+                    ],
+                    Some(|vm, _| install(vm, $name, $root, PROTOTYPE, LocalMembers::<P>::MEMBERS)),
+                )
+            };
+        }
     };
 }
 
@@ -88,9 +98,9 @@ fn arg(args: &[Value]) -> &Value {
     args.first().unwrap_or(&UNDEFINED)
 }
 
-fn construct(
+fn construct<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     target: &Value,
@@ -145,3 +155,5 @@ fn get(
     }
     vm.throw_type_error(roots, "Incompatible queuing strategy receiver")
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

@@ -3,7 +3,7 @@
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{BoxedPrimitive, Object};
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::runtime::Invocation;
 use crate::value::{JsString, Value, ValueRef};
 use crate::vm::VmCore;
@@ -53,9 +53,9 @@ impl VmCore {
     }
 
     /// `Symbol(desc)`: every call produces a fresh identity.
-    pub(crate) fn symbol_constructor(
+    pub(crate) fn symbol_constructor<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: Vec<Value>,
     ) -> Result<Invocation, VmError> {
@@ -70,9 +70,9 @@ impl VmCore {
         Ok(Invocation::Value(Value::symbol(id)))
     }
 
-    pub(crate) fn symbol_for(
+    pub(crate) fn symbol_for<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: Vec<Value>,
     ) -> Result<Invocation, VmError> {

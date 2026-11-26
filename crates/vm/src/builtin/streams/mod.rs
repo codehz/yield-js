@@ -3,29 +3,21 @@
 pub(crate) mod compression;
 pub(crate) mod iteration;
 pub(crate) mod pipe;
+pub(super) mod readable;
+pub(super) mod strategy;
 pub(crate) mod tee;
 pub(super) mod text;
 pub(crate) mod transfer;
-mod transform;
-pub(super) use transform::{TRANSFORM_CONTROLLER_OWNER, TRANSFORM_OWNER};
-mod readable;
-pub(super) use readable::{
-    BYOB_READER_OWNER, BYOB_REQUEST_OWNER, BYTE_CONTROLLER_OWNER, CONTROLLER_OWNER, READER_OWNER,
-    STREAM_OWNER,
-};
-mod strategy;
+pub(super) mod transform;
 mod validate;
-mod writable;
+pub(super) mod writable;
 pub(crate) use validate::{validate_composition, validate_job, validate_record};
-pub(super) use writable::{WRITABLE_CONTROLLER_OWNER, WRITABLE_OWNER, WRITER_OWNER};
-
-pub(super) use strategy::{BYTE_LENGTH_OWNER, COUNT_OWNER};
 
 use crate::VmError;
 use crate::builtin::{define_builtin_data, link_constructor};
 use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, TO_STRING_TAG_SYMBOL};
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, Slot};
 use crate::runtime::Invocation;
 use crate::value::{PropertyKey, PropertyKeyRef, Value};
@@ -75,9 +67,9 @@ impl StreamJob {
 }
 
 impl VmCore {
-    pub(crate) fn resume_stream_job(
+    pub(crate) fn resume_stream_job<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         job: StreamJob,
         settlement: &Settlement,
@@ -107,9 +99,9 @@ impl VmCore {
         self.react(promise, ReactionJob::Streams(job))
     }
 
-    fn stream_callback_promise(
+    fn stream_callback_promise<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         value: Value,
     ) -> Result<ObjectId, VmError> {
@@ -130,12 +122,12 @@ impl VmCore {
     }
 }
 
-fn install(
+fn install<P: PlatformServices>(
     vm: &mut VmCore,
     name: &str,
     root: &'static str,
     prototype: &'static str,
-    members: &[IntrinsicDef],
+    members: &[IntrinsicDef<P>],
 ) {
     let constructor = vm.builtins.get(root);
     let prototype = vm.builtins.get(prototype);
@@ -175,9 +167,9 @@ fn install(
     );
 }
 
-fn dictionary_member(
+fn dictionary_member<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     dictionary: &Value,
     member: &str,

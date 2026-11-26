@@ -6,15 +6,14 @@ use super::{define_builtin_data, install_getter};
 use crate::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, ElementKind, TO_STRING_TAG_SYMBOL, ViewRange};
-use crate::host::Host;
+use crate::host::{CryptoService, Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{PropertyKey, Value, ValueRef};
 use crate::vm::VmCore;
 
-mod subtle;
+pub(super) mod subtle;
 pub(crate) mod worker;
-pub(super) use subtle::{KEY_OWNER, SUBTLE_OWNER};
 
 const ROOT: &str = "crypto";
 const PROTOTYPE: &str = "crypto.prototype";
@@ -31,24 +30,33 @@ const ROOTS: &[RootSpec] = &[
     RootSpec::new(subtle::PROTOTYPE, RootKind::Plain, Some("object.prototype")),
 ];
 
-const MEMBERS: &[IntrinsicDef] = &[
-    IntrinsicDef::call(SUBTLE, 0, |vm, _, roots, _, receiver| {
-        if !is_crypto(vm, receiver) {
-            return vm.throw_type_error(roots, "Incompatible Crypto receiver");
-        }
-        Ok(Invocation::Value(Value::object(
-            vm.builtins.get(subtle::INSTANCE),
-        )))
-    }),
-    IntrinsicDef::call(GET_RANDOM_VALUES, 1, |vm, host, roots, args, receiver| {
-        get_random_values(vm, host, roots, args.into_iter().next(), receiver)
-    }),
-    IntrinsicDef::call(RANDOM_UUID, 0, |vm, host, roots, _, receiver| {
-        random_uuid(vm, host, roots, receiver)
-    }),
-];
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    const MEMBERS: &[IntrinsicDef<P>] = &[
+        IntrinsicDef::call(SUBTLE, 0, |vm, _, roots, _, receiver| {
+            if !is_crypto(vm, receiver) {
+                return vm.throw_type_error(roots, "Incompatible Crypto receiver");
+            }
+            Ok(Invocation::Value(Value::object(
+                vm.builtins.get(subtle::INSTANCE),
+            )))
+        }),
+        IntrinsicDef::call(GET_RANDOM_VALUES, 1, |vm, host, roots, args, receiver| {
+            get_random_values(vm, host, roots, args.into_iter().next(), receiver)
+        }),
+        IntrinsicDef::call(RANDOM_UUID, 0, |vm, host, roots, _, receiver| {
+            random_uuid(vm, host, roots, receiver)
+        }),
+    ];
+}
 
-pub(super) const OWNER: Owner = Owner::new(ROOT, ROOTS, &[MEMBERS, subtle::MEMBERS], Some(install));
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(super) const OWNER: Owner<P> = Owner::new(
+        ROOT,
+        ROOTS,
+        &[Self::MEMBERS, subtle::BuiltinTable::<P>::MEMBERS],
+        Some(install),
+    );
+}
 
 fn install(vm: &mut VmCore, _: &Value) {
     let prototype = vm.builtins.get(PROTOTYPE);
@@ -77,9 +85,9 @@ fn is_crypto(vm: &VmCore, receiver: &Value) -> bool {
     matches!(receiver.view(), ValueRef::Object(id) if id == vm.builtins.get(ROOT))
 }
 
-fn get_random_values(
+fn get_random_values<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     arg: Option<Value>,
     receiver: &Value,
@@ -119,9 +127,9 @@ fn get_random_values(
     Ok(Invocation::Value(Value::object(id)))
 }
 
-fn random_uuid(
+fn random_uuid<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     receiver: &Value,
 ) -> Result<Invocation, VmError> {
@@ -147,8 +155,12 @@ fn random_uuid(
     Ok(Invocation::Value(Value::string(uuid.into())))
 }
 
-fn fill_random(vm: &mut VmCore, host: &Host, bytes: &mut [u8]) -> Result<(), Invocation> {
-    let Some(service) = host.builtin_services().crypto() else {
+fn fill_random<P: PlatformServices>(
+    vm: &mut VmCore,
+    host: &Host<P>,
+    bytes: &mut [u8],
+) -> Result<(), Invocation> {
+    let Some(service) = host.platform().crypto() else {
         return Err(dom_error(
             vm,
             "NotSupportedError",
@@ -167,3 +179,5 @@ fn type_mismatch(vm: &mut VmCore) -> Invocation {
 fn dom_error(vm: &mut VmCore, name: &str, message: &str) -> Invocation {
     Invocation::Thrown(vm.alloc_dom_exception(name.into(), message.into()))
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

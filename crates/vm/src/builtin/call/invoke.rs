@@ -8,7 +8,7 @@ use crate::builtin::symbol_family;
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, Object};
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{CallableTarget, Construction};
 use crate::ops;
 use crate::runtime::{Arguments, Invocation};
@@ -85,9 +85,9 @@ impl VmCore {
     }
 
     /// Script errors are returned as `Invocation::Thrown`.
-    pub(crate) fn invoke(
+    pub(crate) fn invoke<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         callee: &Value,
         args: Arguments<'_>,
@@ -146,7 +146,7 @@ impl VmCore {
                 }
                 CallableTarget::Intrinsic(id) => {
                     let values = args.to_vec()?;
-                    (id.definition().call)(self, host, roots, values, receiver)
+                    (id.definition::<P>().call)(self, host, roots, values, receiver)
                 }
             },
             None => self.throw_type_error(roots, "value is not a function"),
@@ -179,9 +179,9 @@ impl VmCore {
         Ok(self.constructor(dispatch)?.is_some())
     }
 
-    pub(crate) fn construct_with(
+    pub(crate) fn construct_with<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         callee: &Value,
         args: Arguments<'_>,
@@ -272,7 +272,7 @@ impl VmCore {
         let prototype_roots = &roots.with(&args);
         let distinct_new_target = !ops::strict_equal(callee, new_target);
         let skip_prototype = matches!(constructor, Constructor::Native(CallableTarget::Intrinsic(id))
-            if id.definition().skip_new_target_prototype);
+            if id.definition::<P>().skip_new_target_prototype);
         let prototype = if !skip_prototype
             && (distinct_new_target || matches!(constructor, Constructor::Script { .. }))
         {
@@ -337,7 +337,11 @@ impl VmCore {
             ),
             Constructor::Native(CallableTarget::Intrinsic(id)) => {
                 let values = args.to_vec()?;
-                match id.definition().construct.expect("classified constructor") {
+                match id
+                    .definition::<P>()
+                    .construct
+                    .expect("classified constructor")
+                {
                     Construction::WithPrototype(construct) => {
                         let roots = &roots.with(&prototype);
                         construct(self, host, roots, values, prototype)
@@ -385,9 +389,9 @@ impl VmCore {
         self.super_parent(class)
     }
 
-    pub(crate) fn super_construct(
+    pub(crate) fn super_construct<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         context: ObjectId,
         callee: &Value,
@@ -415,9 +419,9 @@ impl VmCore {
         )
     }
 
-    fn construct_super_and_initialize(
+    fn construct_super_and_initialize<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         class: ObjectId,
         new_target: &Value,
@@ -453,9 +457,9 @@ impl VmCore {
         Ok(Invocation::Value(Value::object(receiver)))
     }
 
-    pub(crate) fn reflect_call(
+    pub(crate) fn reflect_call<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         construct: bool,
@@ -495,9 +499,9 @@ impl VmCore {
         }
     }
 
-    pub(crate) fn arguments_from_array_like(
+    pub(crate) fn arguments_from_array_like<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         list: &Value,
     ) -> Result<Result<Vec<Value>, Value>, VmError> {

@@ -7,7 +7,7 @@ use super::{
 };
 use crate::VmError;
 use crate::gc::ActiveRoots;
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::Value;
@@ -15,20 +15,22 @@ use crate::vm::VmCore;
 
 macro_rules! timer_function {
     ($owner:ident, $name:literal, $length:literal, $call:expr) => {
-        pub(super) const $owner: Owner = Owner::new(
-            $name,
-            &[RootSpec::new(
+        impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+            pub(super) const $owner: Owner<P> = Owner::new(
                 $name,
-                RootKind::Native(IntrinsicKey::new($name, Slot::Global, "")),
-                FUNCTION_PARENT,
-            )],
-            &[&[IntrinsicDef::call(
-                IntrinsicKey::new($name, Slot::Global, ""),
-                $length,
-                $call,
-            )]],
-            None,
-        );
+                &[RootSpec::new(
+                    $name,
+                    RootKind::Native(IntrinsicKey::new($name, Slot::Global, "")),
+                    FUNCTION_PARENT,
+                )],
+                &[&[IntrinsicDef::call(
+                    IntrinsicKey::new($name, Slot::Global, ""),
+                    $length,
+                    $call,
+                )]],
+                None,
+            );
+        }
     };
 }
 
@@ -44,9 +46,9 @@ timer_function!(
 timer_function!(CLEAR_TIMEOUT, "clearTimeout", 0, clear);
 timer_function!(CLEAR_INTERVAL, "clearInterval", 0, clear);
 
-fn set(
+fn set<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     repeat: bool,
@@ -59,7 +61,7 @@ fn set(
         Ok(number) => number.max(0) as u32,
         Err(error) => return Ok(Invocation::Thrown(error)),
     };
-    if host.builtin_services().timer().is_none() {
+    if host.platform().timer().is_none() {
         return Ok(Invocation::Thrown(vm.alloc_dom_exception(
             "NotSupportedError".into(),
             "Timer service is not available".into(),
@@ -76,9 +78,9 @@ fn set(
     Ok(Invocation::Value(Value::number(f64::from(id))))
 }
 
-fn clear(
+fn clear<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     _: &Value,
@@ -90,9 +92,9 @@ fn clear(
     Ok(Invocation::Value(Value::UNDEFINED))
 }
 
-fn long(
+fn long<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     value: Option<&Value>,
 ) -> Result<Result<i32, Value>, VmError> {
@@ -100,3 +102,5 @@ fn long(
         .coerce_number(host, roots, value.unwrap_or(&Value::UNDEFINED))?
         .map(|number| crate::ops::number_to_uint32(number) as i32))
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

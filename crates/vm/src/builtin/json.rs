@@ -6,19 +6,19 @@ use std::ops::Range;
 use crate::error::VmError;
 use crate::gc::{ActiveRoots, TraceRoots, Tracer};
 use crate::heap::{Attributes, BoxedPrimitive, DescriptorUpdate, Object};
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::runtime::{Arguments, Invocation};
 use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
 use crate::vm::VmCore;
 
 #[yield_binding_macros::builtin_global(name = "JSON", root = "json")]
 pub(crate) mod namespace {
-    use super::{ActiveRoots, Host, Invocation, Value, VmCore, VmError};
+    use super::{ActiveRoots, Host, Invocation, PlatformServices, Value, VmCore, VmError};
 
     #[function(name = "parse", length = 2)]
-    fn parse(
+    fn parse<P: PlatformServices>(
         vm: &mut VmCore,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -26,9 +26,9 @@ pub(crate) mod namespace {
     }
 
     #[function(name = "stringify", length = 3)]
-    fn stringify(
+    fn stringify<P: PlatformServices>(
         vm: &mut VmCore,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -36,9 +36,9 @@ pub(crate) mod namespace {
     }
 
     #[function(name = "rawJSON", length = 1)]
-    fn raw_json(
+    fn raw_json<P: PlatformServices>(
         vm: &mut VmCore,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -46,9 +46,9 @@ pub(crate) mod namespace {
     }
 
     #[function(name = "isRawJSON", length = 1)]
-    fn is_raw_json(
+    fn is_raw_json<P: PlatformServices>(
         vm: &mut VmCore,
-        _host: &Host,
+        _host: &Host<P>,
         _roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -464,9 +464,9 @@ struct Serialize<'a> {
 }
 
 impl VmCore {
-    fn json_parse(
+    fn json_parse<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -523,9 +523,9 @@ impl VmCore {
         }
     }
 
-    fn json_raw_json(
+    fn json_raw_json<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -556,9 +556,9 @@ impl VmCore {
         Ok(Invocation::Thrown(error))
     }
 
-    fn json_stringify(
+    fn json_stringify<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -611,9 +611,9 @@ impl VmCore {
         }
     }
 
-    fn json_gap(
+    fn json_gap<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         space: &Value,
     ) -> Result<Result<JsString, Value>, VmError> {
@@ -659,9 +659,9 @@ impl VmCore {
         }))
     }
 
-    fn json_property_list(
+    fn json_property_list<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
     ) -> Result<Result<Vec<JsString>, Value>, VmError> {
@@ -693,9 +693,9 @@ impl VmCore {
         Ok(Ok(keys))
     }
 
-    fn serialize_property(
+    fn serialize_property<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         state: &mut Serialize<'_>,
         holder: ObjectId,
@@ -751,9 +751,9 @@ impl VmCore {
         self.serialize_value(host, roots, state, value)
     }
 
-    fn serialize_value(
+    fn serialize_value<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         state: &mut Serialize<'_>,
         value: Value,
@@ -796,9 +796,9 @@ impl VmCore {
         Ok(Ok(Some(tree)))
     }
 
-    fn serialize_array(
+    fn serialize_array<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         state: &mut Serialize<'_>,
         id: ObjectId,
@@ -828,9 +828,9 @@ impl VmCore {
         Ok(Ok(JsonValue::Array(values)))
     }
 
-    fn serialize_object(
+    fn serialize_object<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         state: &mut Serialize<'_>,
         id: ObjectId,
@@ -883,9 +883,9 @@ impl VmCore {
         }
     }
 
-    fn revive(
+    fn revive<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         reviver: &Reviver<'_>,
         holder: ObjectId,
@@ -975,9 +975,9 @@ impl VmCore {
         )
     }
 
-    fn apply_reviver_result(
+    fn apply_reviver_result<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         holder: ObjectId,
         key: JsString,

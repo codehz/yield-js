@@ -8,7 +8,7 @@
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{Object, PromiseState};
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::runtime::{Arguments, Invocation, Microtask, Settlement};
 use crate::value::{ObjectId, PropertyKeyRef, Value, ValueRef};
 use crate::vm::VmCore;
@@ -26,9 +26,9 @@ enum ResolutionInput {
 }
 
 impl VmCore {
-    pub(crate) fn resolve_promise(
+    pub(crate) fn resolve_promise<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         result: ObjectId,
         value: Value,
@@ -46,9 +46,9 @@ impl VmCore {
 
     /// PromiseResolve(%Promise%, value) can reuse a genuine promise, but only
     /// after observing its constructor. Resolving functions never do this check.
-    pub(crate) fn promise_identity(
+    pub(crate) fn promise_identity<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Result<Result<Option<ObjectId>, Value>, VmError> {
@@ -67,9 +67,9 @@ impl VmCore {
         }
     }
 
-    fn classify_resolution(
+    fn classify_resolution<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         value: Value,
     ) -> Result<ResolutionInput, VmError> {
@@ -124,9 +124,9 @@ impl VmCore {
         }
     }
 
-    pub(crate) fn run_assimilate(
+    pub(crate) fn run_assimilate<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         result: ObjectId,
         receiver: &Value,
@@ -146,9 +146,9 @@ impl VmCore {
         Ok(())
     }
 
-    pub(crate) fn prepare_await(
+    pub(crate) fn prepare_await<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         input: Value,
     ) -> Result<Result<AwaitPrepared, Value>, VmError> {
@@ -167,9 +167,9 @@ impl VmCore {
         }
     }
 
-    pub(crate) fn run_adopt(
+    pub(crate) fn run_adopt<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         result: ObjectId,
         settlement: &Settlement,

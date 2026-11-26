@@ -34,7 +34,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 公共入口：
 
 - `Compiler::compile(Project) -> Result<Build, CompileError>` 链接显式根；`Compiler::from_dts(source)` 从宿主的 `.d.ts` 读出独立的宿主导入清单。默认生成 Error 栈位置；`stack_traces = false` 全部禁用。`ModuleResolver::resolve` 返回 `ResolvedModule`，同时给出规范模块 ID 与该定义模块的框架标记；`NodeResolver` 把 `node_modules` 中定义的模块标为框架，覆盖包 `exports` 目标、嵌套依赖和包内相对导入，其他解析器默认不标记。标记只决定是否生成栈位置，不改变解析、链接或运行语义；隐藏仅影响本模块，框架回调进入其他模块时后者仍可见。
-- `Vm::new(build, host, VmOptions::default())` 按值接管不可克隆的 `Host`，校验构建与导入，实例化全部源码模块，求值可选 preload 子图并安装其活绑定 getter，再求值 entry 并排空初始化微任务。`Vm` 不带宿主类型参数；`Host::default()` 提供空宿主。
+- `Vm::new(build, host, VmOptions::default())` 按值接管不可克隆的 `Host`，校验构建与导入，实例化全部源码模块，求值可选 preload 子图并安装其活绑定 getter，再求值 entry 并排空初始化微任务。`Vm<P>` 按值持有 `Host<P>`；`Host::default()` 提供空宿主。
 - `VmOptions::default()` 不设置基准 URL 或测试时钟。用 `VmOptions { base_url: Some("https://example.com/"), ..Default::default() }` 可在任何模块求值之前设置默认基准。构造和恢复的选项都可通过 `test_clock` 注入 `Arc<dyn TestClock>`，默认使用正常时钟。
 - `Vm::get_export("name")` 读取入口链接导出的当前值（含再导出）；名字不唯一或不存在即错误。
 - `vm.start("run", args)` 读取公开绑定并以 `undefined` 为接收者调用；`args` 是 `JsValue` 常量。随后调用 `vm.run_until_idle()`；所有执行入口都使用已接管的宿主，不再接收宿主参数。
@@ -44,7 +44,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 - `RestoreOptions::default()` 使用 `SnapshotValidation::Trusted`，只接收由 VM 捕获、未经篡改的有效镜像，不重查堆图。开发、测试和诊断可传入 `RestoreOptions { validation: SnapshotValidation::Full, ..Default::default() }` 执行完整不变量审计。两种模式都要求调用方保证来源和完整性并限制读入大小；完整审计并不使不可信输入变得安全。
 - `Vm::new` 和 `Vm::restore` 都直接接受 `Build` 或 `VerifiedBuild`。传入 `Build` 时当次完整校验；`VerifiedBuild::new(build)` 消费并完整校验 `Build`，持有不可变构建和宿主无关的派生表，可在线程内克隆复用。两种输入都为每个 VM 独立链接宿主、持有堆和缓存；恢复仍要求精确匹配构建身份与绑定指纹。
 - `CallCx::promise(op)` 以原生 Promise 为目标启动外部工作。链接的后台任务走同一注册路径，各自拥有可取消的数字句柄。通过 `Vm::complete_operation(token, completion)` 与当前 VM 代际 token 交付。注册在 drop 时释放平台资源。恢复后先发布 VM，再调用 `Vm::start_recovered_operations()`。
-- `host!` 构造 `Result<Host, String>`；服务值装进宏生成的类型化结构体，整体擦除。链接按确切 Rust 类型将消费者属性宏的必需依赖解析到该宿主的字段。分派入口将预解析视图绑定到声明类型，命名访问器直接投影字段。偏移与同一 `Bindings` 所拥有的存储配对，不得跨宿主使用。嵌入方在冷路径用 `vm.bind_service::<T>()` 解析并借用。依赖、布局和实例不进入绑定指纹或快照。
+- `host!` 构造 `Result<Host<P>, String>`；具名内建值由 `P` 的访问器直接借用，自定义 `Type => value` 才进入擦除布局。链接按确切 Rust 类型解析应用声明的必需依赖，分派入口用预解析偏移直接投影字段。偏移与同一 `Bindings` 的存储配对，不得跨宿主使用。冷路径的 `vm.bind_service::<T>()` 只查找自定义服务。平台类型、服务依赖、布局和实例不进入指纹或快照。
 - 内部的 `VmCore` 持有执行状态；公开的 `Vm` 将 core 与 `Host` 绑定，调用内部入口时借用宿主。销毁 VM 时先释放 core 及其活动登记，再释放宿主资源。快照从 core 捕获持久记录，捕获时可借用服务执行 codec 或 checkpoint，但不序列化运行时宿主。
 
 ## 2. 挂起、恢复与快照不变量（不得弱化）
@@ -149,7 +149,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 
 - 新增 opcode：先在 `vm/src/bytecode/instr.rs` 的指令表末尾追加一项（变体、字段与顺序即产物编码）。`slots[...]` 按列出顺序检查槽位范围；`custom` 需要在 `Build::validate_function` 的 `validate_custom!` 中提供规则，按表中字段顺序接收绑定，缺规则时无法编译。再改 `compiler/src/instr.rs`（uses/defs/throws/rewrite）与 lowerer。新增控制流指令还需更新 `cfg.rs` 和 `cfg/layout.rs`；优化不遍历字节码 PC。
 - 版本号：不兼容的字节码改动升 `BYTECODE_VERSION`（`crates/vm/src/bytecode.rs`）；快照记录形状改动升 `SNAPSHOT_FORMAT_VERSION`（`crates/vm/src/snapshot/record.rs`）；产物容器、magic 或 bincode 编码选项改动升 `BUILD_FORMAT_VERSION`（`crates/vm/src/bytecode.rs`）。三个契约各自独立，只有对应契约变化才升。`Build::finalize` 用 `compute_id` 设置 `build_id`；内容变化本身已使旧快照被拒绝，`build_id` 不是版本号的替代。`build_id` 与绑定指纹使用 xxh3-128 这一稳定的非加密摘要，只检测意外损坏和契约错配，不提供对抗篡改的安全性。构建摘要输入使用 bincode 固定整数、小端编码；编码选项与 crate 版本属于 `build_id` 契约，绑定指纹仍使用规范化文本。
-- 错误类型：`CompileError` 是带位置的结构体（`message`、`line`、`column`），不是 `thiserror` 枚举。`VmError` 是 `thiserror`（`InvalidBuild`、`InvalidSnapshot`、`MissingImport` / `MissingOperation`、`Host`、`HostFault`、`UnknownOperation`、`InvalidState`、`Thrown`）。脚本抛出是 `Value`（`ExecOutcome::Thrown`），不是 `VmError`，直到它拒绝某个异步结果。宿主绑定函数返回 `JsResult`（`JsError::Throw` / `JsError::Fault`）；宿主调度失败用 `HostFault`。可选的 `Rc<dyn Diagnostics>` 接收未取消的全局异常与拒绝报告；模块初始化异常在 `Vm::new` 返回原 `VmError::Thrown` 前以 `Diagnostic::StartupException` 报告，不派发脚本事件。
+- 错误类型：`CompileError` 是带位置的结构体（`message`、`line`、`column`），不是 `thiserror` 枚举。`VmError` 是 `thiserror`（`InvalidBuild`、`InvalidSnapshot`、`MissingImport` / `MissingOperation`、`Host`、`HostFault`、`UnknownOperation`、`InvalidState`、`Thrown`）。脚本抛出是 `Value`（`ExecOutcome::Thrown`），不是 `VmError`，直到它拒绝某个异步结果。宿主绑定函数返回 `JsResult`（`JsError::Throw` / `JsError::Fault`）；宿主调度失败用 `HostFault`。可选的 `diagnostics`（`Diagnostics`） 接收未取消的全局异常与拒绝报告；模块初始化异常在 `Vm::new` 返回原 `VmError::Thrown` 前以 `Diagnostic::StartupException` 报告，不派发脚本事件。
 - 有序映射一律 `BTreeMap` / `BTreeSet`（imports、globals、operations、natives）。身份或快照顺序相关时保持这一点。
 - `const` 的可变性按绑定 ID 在编译期解析，包括经闭包。初始化写入（含循环声明）允许。对 `const` 赋值在写入处抛出可捕获的运行期 `TypeError`，位于此前求值副作用之后；逻辑赋值可以短路而不写入。这不会冻结绑定值。当前函数的静态 TDZ 状态在 `compiler/src/env.rs` 的 `pending_lexicals`，不在 emitter 中。闭包不继承该集合，因此跨闭包的提前读取得到 `undefined`。这不是完整 ECMAScript TDZ。`for` 的 `let` / `const` 头（C 风格、`for…in`、`for…of`、`for await…of`）每轮建立独立环境：`NewIterationEnv` 从当前环境复制仍逃逸的循环绑定到以保存的外层环境为父的新环境，`RestoreEnv` 在循环结束后恢复外层环境。未逃逸的循环头绑定由 `compiler/src/promote.rs` 提升为帧槽并从 `NewIterationEnv` 的绑定表移除；绑定表为空且循环体没有仍需独立单元格的被捕获声明时，整组环境指令被删除。循环体内的被捕获块级声明仍要求每轮新单元格，因此即使循环头绑定全部提升也要保留空绑定表的 `NewIterationEnv`。
 - 名字解析（`compiler/src/names.rs`）：本地绑定、静态导入（源码与宿主）、合格的 preload 全局，最后是内建及三个全局事件处理器属性。裸 preload 名在 preload 子图之外经 `globalThis` 读取只读 getter；处理器名经固定 `globalThis` 读写动态属性，裸调用不绑定接收者。

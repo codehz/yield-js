@@ -11,7 +11,7 @@ use crate::heap::{
     Heap, Object, OwnedEdge, PromiseState, Property, ReactionJob, ReadableState, WritableFlight,
     WritableSink, push_value,
 };
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::runtime::{Invocation, Settlement};
 use crate::snapshot::OrdinaryTask;
 use crate::value::{ObjectId, PropertyKeyRef, Value, ValueRef};
@@ -474,9 +474,9 @@ impl VmCore {
         self.transfer_request(id, TransferStage::Data, Command::Pull)
     }
 
-    pub(super) fn transfer_send(
+    pub(super) fn transfer_send<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         flight: WritableFlight,
@@ -501,9 +501,9 @@ impl VmCore {
         self.transfer_request(id, stage, cmd)
     }
 
-    pub(super) fn transfer_cancel(
+    pub(super) fn transfer_cancel<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         reason: &Value,
@@ -512,9 +512,9 @@ impl VmCore {
         self.transfer_request(id, TransferStage::Finish, Command::Stop(reason))
     }
 
-    fn transfer_reason(
+    fn transfer_reason<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         reason: &Value,
     ) -> Result<Value, VmError> {
@@ -523,9 +523,9 @@ impl VmCore {
         })
     }
 
-    pub(crate) fn deliver_stream_message(
+    pub(crate) fn deliver_stream_message<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         id: ObjectId,
         sequence: u64,
     ) -> Result<(), VmError> {
@@ -667,9 +667,9 @@ impl VmCore {
         self.post_transfer(id, Message::Response(stage, reply))
     }
 
-    pub(super) fn resume_transfer(
+    pub(super) fn resume_transfer<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         stage: TransferStage,

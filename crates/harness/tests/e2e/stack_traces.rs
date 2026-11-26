@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use yield_compiler::{Compiler, NodeResolver, Project};
-use yield_harness::{TestHost, string};
+use yield_harness::{TestHost, TestVm, string};
 use yield_vm::{Build, Completion, JsValue, PromiseState, Snapshot, Value, ValueRef, Vm};
 
 use super::support::{TEST_DECLARATIONS, declared};
@@ -143,7 +143,7 @@ fn retains_creation_stack_across_snapshot_restore() {
     vm.run_until_idle().unwrap();
     let snapshot = vm.snapshot(std::slice::from_ref(&result)).unwrap();
     let decoded = Snapshot::from_bytes(&snapshot.to_bytes().unwrap()).unwrap();
-    let finish = |mut vm: Vm, host: &mut TestHost| {
+    let finish = |mut vm: TestVm, host: &mut TestHost| {
         host.complete(&mut vm, "wait:stack", Completion::Fulfilled(string("done")))
             .unwrap();
         vm.run_until_idle().unwrap();

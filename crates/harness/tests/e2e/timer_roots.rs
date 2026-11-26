@@ -212,14 +212,14 @@ fn running_callback_can_clear_itself_and_prevent_the_next_timer_arm() {
     let clock = Arc::new(FakeClock::default());
     let make_host = || {
         yield_vm::host! {
-        dts: "../dts/repeat_timer.d.ts",
-        modules: [RepeatTimer],
-        services: {
-            std::rc::Rc<dyn yield_vm::Diagnostics> => std::rc::Rc::new(super::support::UnexpectedUncaught),
-            std::sync::Arc<yield_harness::FakeClock> => Arc::clone(&clock),
-        },
-    }
-    .unwrap()
+            dts: "../dts/repeat_timer.d.ts",
+            modules: [RepeatTimer],
+            services: {
+                diagnostics: super::support::UnexpectedUncaught,
+                std::sync::Arc<yield_harness::FakeClock> => Arc::clone(&clock),
+            },
+        }
+        .unwrap()
     };
     let program = compile_main(
         r#"

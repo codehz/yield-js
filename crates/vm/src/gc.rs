@@ -183,15 +183,17 @@ impl VmCore {
         (self.heap.allocations, self.heap.alloc_bytes)
     }
 
-    pub(crate) fn collect_active(
+    pub(crate) fn collect_active<P: crate::PlatformServices>(
         &mut self,
-        host: &crate::Host,
+        host: &crate::Host<P>,
         active: &ActiveRoots<'_>,
     ) -> Result<usize, VmError> {
+        use crate::GcRoots as _;
+
         self.collect_with_roots(
             |tracer| {
                 let mut status = Ok(());
-                let Some(roots) = host.builtin_services().gc_roots() else {
+                let Some(roots) = host.platform().gc_roots() else {
                     return Ok(());
                 };
                 roots.visit(&mut |value| {

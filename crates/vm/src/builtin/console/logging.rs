@@ -7,7 +7,7 @@ use crate::console::{
     preview::Preview,
 };
 use crate::gc::ActiveRoots;
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::runtime::Invocation;
 use crate::value::ValueRef;
 use crate::vm::VmCore;
@@ -26,9 +26,9 @@ macro_rules! convert {
     };
 }
 
-pub(super) fn payload(
+pub(super) fn payload<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     method: Method,
     args: &[Value],
@@ -129,9 +129,9 @@ pub(super) fn raw(vm: &VmCore, args: &[Value]) -> Vec<ConsoleArg> {
         .collect()
 }
 
-pub(super) fn format(
+pub(super) fn format<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: &[Value],
 ) -> Completion<Vec<ConsoleArg>> {

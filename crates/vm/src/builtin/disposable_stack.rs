@@ -9,7 +9,7 @@ use crate::heap::{
     ASYNC_DISPOSE_SYMBOL, Attributes, DISPOSE_SYMBOL, DisposableResource, DisposeHint, Object,
     PlainObject, TO_STRING_TAG_SYMBOL,
 };
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::{Invocation, Settlement};
 use crate::value::{ObjectId, PropertyKey, Value, ValueRef};
@@ -29,6 +29,8 @@ macro_rules! stack_family {
     ($module:ident, $name:literal, $root:literal, $prototype:literal, $async:literal,
      $dispose:literal, $symbol:ident) => {
         pub(crate) mod $module {
+            pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);
+
             use super::*;
 
             const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new($name, Slot::Global, "");
@@ -62,31 +64,37 @@ macro_rules! stack_family {
                 };
             }
 
-            const INTRINSICS: &[IntrinsicDef] = &[
-                IntrinsicDef::constructor(
-                    CONSTRUCTOR,
-                    0,
-                    |vm, _, roots, _, _| {
-                        vm.throw_type_error(roots, concat!($name, " requires new"))
-                    },
-                    |vm, _, _, _, prototype| {
-                        let prototype = prototype.unwrap_or_else(|| vm.builtins.get($prototype));
-                        Ok(Invocation::Value(Value::object(vm.alloc_disposable_stack(
-                            $async,
-                            prototype,
-                            Vec::new(),
-                        ))))
-                    },
-                ),
-                operation!(USE, 1, Use),
-                operation!(ADOPT, 2, Adopt),
-                operation!(DEFER, 1, Defer),
-                operation!(MOVE, 0, Move),
-                operation!(DISPOSED, 0, Disposed),
-                operation!(DISPOSE, 0, Dispose),
-            ];
+            impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+                const INTRINSICS: &[IntrinsicDef<P>] = &[
+                    IntrinsicDef::constructor(
+                        CONSTRUCTOR,
+                        0,
+                        |vm, _, roots, _, _| {
+                            vm.throw_type_error(roots, concat!($name, " requires new"))
+                        },
+                        |vm, _, _, _, prototype| {
+                            let prototype =
+                                prototype.unwrap_or_else(|| vm.builtins.get($prototype));
+                            Ok(Invocation::Value(Value::object(vm.alloc_disposable_stack(
+                                $async,
+                                prototype,
+                                Vec::new(),
+                            ))))
+                        },
+                    ),
+                    operation!(USE, 1, Use),
+                    operation!(ADOPT, 2, Adopt),
+                    operation!(DEFER, 1, Defer),
+                    operation!(MOVE, 0, Move),
+                    operation!(DISPOSED, 0, Disposed),
+                    operation!(DISPOSE, 0, Dispose),
+                ];
+            }
 
-            pub(crate) const OWNER: Owner = Owner::new($root, ROOTS, &[INTRINSICS], Some(install));
+            impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+                pub(crate) const OWNER: Owner<P> =
+                    Owner::new($root, ROOTS, &[Self::INTRINSICS], Some(install));
+            }
 
             fn install(vm: &mut VmCore, _: &Value) {
                 let prototype = vm.builtins.get($prototype);
@@ -141,9 +149,6 @@ stack_family!(
     ASYNC_DISPOSE_SYMBOL
 );
 
-pub(crate) use asynchronous::OWNER as ASYNC_OWNER;
-pub(crate) use sync::OWNER as SYNC_OWNER;
-
 impl VmCore {
     fn alloc_disposable_stack(
         &mut self,
@@ -160,9 +165,9 @@ impl VmCore {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn disposable_stack_method(
+    fn disposable_stack_method<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         async_: bool,
         intrinsic_prototype: &'static str,

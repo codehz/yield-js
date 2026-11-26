@@ -4,10 +4,10 @@ use super::support::{
     TEST_DECLARATIONS, compile_main, compile_preloaded, declared, json_round_trip,
 };
 use yield_compiler::Compiler;
-use yield_harness::TestHost;
+use yield_harness::{TestHost, TestVm};
 use yield_vm::{Value, Vm, VmError};
 
-fn vm_of(source: &str, options: &Compiler) -> Vm {
+fn vm_of(source: &str, options: &Compiler) -> TestVm {
     let build = compile_main(source, options).unwrap();
     Vm::new(build, TestHost::default().host(), Default::default()).unwrap()
 }

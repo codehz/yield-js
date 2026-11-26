@@ -8,7 +8,7 @@
 
 待触发的宿主 timer 和已进入 VM 的普通任务都不是已入队的 VM 微任务，可以跨快照存在。宿主的切点须协调事件交付与存档：不接受已从宿主摘下、却未写入 VM 且无法由持久记录重建的投递。恢复发布前不得开始外部工作或投递；不保存正在运行的调度调用栈。
 
-`vm.snapshot(roots)` 与 `vm.collect_garbage(roots)` 各自接受显式的同 VM `Value` 切片。捕获时它只扩充可达对象图，不把宿主持有的值清单写入快照，也不在恢复后自动注册为 GC 根。两者都不调用 `Rc<dyn GcRoots>` 服务；该服务仅用于 `CallCx::request_gc` 请求的同步收集。需要持久保存并在恢复后重新访问的 JS 状态应通过 VM 可达的绑定、属性或持久槽表达。
+`vm.snapshot(roots)` 与 `vm.collect_garbage(roots)` 各自接受显式的同 VM `Value` 切片。捕获时它只扩充可达对象图，不把宿主持有的值清单写入快照，也不在恢复后自动注册为 GC 根。两者都不调用 `gc_roots`（`GcRoots`） 服务；该服务仅用于 `CallCx::request_gc` 请求的同步收集。需要持久保存并在恢复后重新访问的 JS 状态应通过 VM 可达的绑定、属性或持久槽表达。
 
 ## Operation 的中断与恢复
 

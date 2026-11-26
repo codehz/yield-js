@@ -26,7 +26,7 @@ use crate::builtin::{
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{ArrayBufferObject, Attributes, ElementKind, Object, PlainObject, ViewRange};
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{JsBigInt, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
@@ -88,16 +88,18 @@ macro_rules! families {
             )+
         ];
 
-        const CONSTRUCTORS: &[IntrinsicDef] = &[
-            $(
-                IntrinsicDef::constructor_with_target(
-                    IntrinsicKey::new(ElementKind::$kind.name(), Slot::Global, ""),
-                    3,
-                    typed::call_requires_new,
-                    family_constructors::$function,
-                ),
-            )+
-        ];
+        impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+            const CONSTRUCTORS: &[IntrinsicDef<P>] = &[
+                $(
+                    IntrinsicDef::constructor_with_target(
+                        IntrinsicKey::new(ElementKind::$kind.name(), Slot::Global, ""),
+                        3,
+                        typed::call_requires_new,
+                        family_constructors::$function,
+                    ),
+                )+
+            ];
+        }
     };
 }
 
@@ -105,7 +107,7 @@ mod family_constructors {
     use super::ElementKind;
     use crate::error::VmError;
     use crate::gc::ActiveRoots;
-    use crate::host::Host;
+    use crate::host::{Host, PlatformServices};
     use crate::runtime::Invocation;
     use crate::value::Value;
     use crate::vm::VmCore;
@@ -113,9 +115,9 @@ mod family_constructors {
     macro_rules! constructors {
         ($($function:ident => $kind:ident),+ $(,)?) => {
             $(
-                pub(super) fn $function(
+                pub(super) fn $function<P: PlatformServices>(
                     vm: &mut VmCore,
-                    host: &Host,
+                    host: &Host<P>,
                     roots: &ActiveRoots<'_>,
                     args: Vec<Value>,
                     new_target: &Value,
@@ -157,14 +159,19 @@ families! {
     big_uint64: BigUint64 => "bigUint64Array", "bigUint64Array.prototype",
 }
 
-const GROUPS: &[&[IntrinsicDef]] = &[
-    buffer::INTRINSICS,
-    view::INTRINSICS,
-    typed::INTRINSICS,
-    CONSTRUCTORS,
-];
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    const GROUPS: &[&[IntrinsicDef<P>]] = &[
+        buffer::BuiltinTable::<P>::INTRINSICS,
+        view::BuiltinTable::<P>::INTRINSICS,
+        typed::BuiltinTable::<P>::INTRINSICS,
+        Self::CONSTRUCTORS,
+    ];
+}
 
-pub(crate) const OWNER: Owner = Owner::new(ARRAY_BUFFER_ROOT, BINARY_ROOTS, GROUPS, Some(install));
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const OWNER: Owner<P> =
+        Owner::new(ARRAY_BUFFER_ROOT, BINARY_ROOTS, Self::GROUPS, Some(install));
+}
 
 /// Binary roots are allocated as a block, so the first binary global installs
 /// all of them: two shared prototypes plus one constructor per element type.
@@ -291,9 +298,9 @@ impl VmCore {
     }
 
     /// ToIntegerOrInfinity: truncate towards zero, with NaN read as zero.
-    pub(crate) fn integer_or_infinity(
+    pub(crate) fn integer_or_infinity<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Completion<f64> {
@@ -311,9 +318,9 @@ impl VmCore {
     }
 
     /// ToIndex: an integer index in `0 ..= 2^53 - 1`.
-    pub(crate) fn coerce_index(
+    pub(crate) fn coerce_index<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Completion<usize> {
@@ -328,9 +335,9 @@ impl VmCore {
     }
 
     /// ToAbsoluteIndex: a negative index counts from the end.
-    pub(crate) fn absolute_index(
+    pub(crate) fn absolute_index<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         value: &Value,
         length: usize,
@@ -347,9 +354,9 @@ impl VmCore {
     }
 
     /// ToClampedIndex: clamp a relative index into `0 ..= length`.
-    pub(crate) fn clamped_index(
+    pub(crate) fn clamped_index<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         value: &Value,
         length: usize,
@@ -362,9 +369,9 @@ impl VmCore {
     }
 
     /// ToBigInt: unlike the `BigInt` constructor, a Number is a TypeError.
-    pub(crate) fn coerce_to_bigint(
+    pub(crate) fn coerce_to_bigint<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Completion<JsBigInt> {
@@ -406,9 +413,9 @@ impl VmCore {
     }
 
     /// Convert a value into the raw bits one element stores.
-    pub(crate) fn element_bits(
+    pub(crate) fn element_bits<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         kind: ElementKind,
         value: &Value,
@@ -428,9 +435,9 @@ impl VmCore {
     }
 
     /// TypedArraySetElement: convert first, then recheck, then store.
-    pub(crate) fn typed_set_element(
+    pub(crate) fn typed_set_element<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         index: u64,
@@ -538,9 +545,9 @@ impl VmCore {
 
     /// `GetPrototypeFromConstructor`: a non-object prototype falls back to the
     /// intrinsic, after any getter on `newTarget` has run.
-    pub(crate) fn prototype_from(
+    pub(crate) fn prototype_from<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         new_target: &Value,
         default: &'static str,
@@ -572,3 +579,5 @@ pub(crate) fn is_view(heap: &crate::heap::Heap, value: &Value) -> bool {
         Ok(Object::TypedArray(_) | Object::DataView(_))
     )
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

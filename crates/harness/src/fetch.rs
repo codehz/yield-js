@@ -24,14 +24,14 @@ const HEAD_LIMIT: usize = 64 * 1024;
 /// No DNS, TLS, retries, redirects, proxy, cookie jar or content decoding.
 pub struct LoopbackFetchService {
     allowlist: BTreeSet<String>,
-    live: Mutex<BTreeMap<OperationToken, Arc<Exchange>>>,
+    live: Arc<Mutex<BTreeMap<OperationToken, Arc<Exchange>>>>,
 }
 
 impl LoopbackFetchService {
     pub fn new(allowlist: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             allowlist: allowlist.into_iter().map(Into::into).collect(),
-            live: Mutex::default(),
+            live: Arc::default(),
         }
     }
 
@@ -67,7 +67,7 @@ impl LoopbackFetchService {
 
 impl FetchService for LoopbackFetchService {
     fn start(
-        self: Arc<Self>,
+        &self,
         token: OperationToken,
         request: HopRequest,
     ) -> Result<Box<dyn FetchRegistration>, HostFault> {
@@ -95,7 +95,7 @@ impl FetchService for LoopbackFetchService {
             )));
         }
         Ok(Box::new(LoopbackRegistration {
-            service: self,
+            live: self.live.clone(),
             token,
             exchange,
         }))
@@ -215,7 +215,7 @@ impl Exchange {
 }
 
 struct LoopbackRegistration {
-    service: Arc<LoopbackFetchService>,
+    live: Arc<Mutex<BTreeMap<OperationToken, Arc<Exchange>>>>,
     token: OperationToken,
     exchange: Arc<Exchange>,
 }
@@ -281,7 +281,7 @@ impl FetchRegistration for LoopbackRegistration {
 impl Drop for LoopbackRegistration {
     fn drop(&mut self) {
         let _ = self.cancel();
-        self.service.live.lock().unwrap().remove(&self.token);
+        self.live.lock().unwrap().remove(&self.token);
     }
 }
 
@@ -634,7 +634,7 @@ pub enum FetchCall {
 /// Test fixture that deliberately does not enforce protocol ordering or credit.
 /// Calls and events are independently driven so tests can exercise VM errors.
 #[derive(Default)]
-pub struct ControllableFetchService(Mutex<Control>);
+pub struct ControllableFetchService(Arc<Mutex<Control>>);
 
 #[derive(Default)]
 struct Control {
@@ -680,7 +680,7 @@ impl ControllableFetchService {
 
 impl FetchService for ControllableFetchService {
     fn start(
-        self: Arc<Self>,
+        &self,
         token: OperationToken,
         request: HopRequest,
     ) -> Result<Box<dyn FetchRegistration>, HostFault> {
@@ -696,20 +696,20 @@ impl FetchService for ControllableFetchService {
             }
         }
         Ok(Box::new(ControlledRegistration {
-            service: self,
+            control: self.0.clone(),
             token,
         }))
     }
 }
 
 struct ControlledRegistration {
-    service: Arc<ControllableFetchService>,
+    control: Arc<Mutex<Control>>,
     token: OperationToken,
 }
 
 impl ControlledRegistration {
     fn record(&self, call: FetchCall) -> Result<(), HostFault> {
-        self.service.0.lock().unwrap().calls.push(call);
+        self.control.lock().unwrap().calls.push(call);
         Ok(())
     }
 }
@@ -731,7 +731,7 @@ impl FetchRegistration for ControlledRegistration {
 
 impl Drop for ControlledRegistration {
     fn drop(&mut self) {
-        self.service.0.lock().unwrap().live.remove(&self.token);
+        self.control.lock().unwrap().live.remove(&self.token);
     }
 }
 

@@ -930,6 +930,14 @@ pub(super) fn builtin_global(args: TokenStream, item: TokenStream) -> Result<Tok
     } else {
         syn::parse_quote!(const ROOT: &str = #root;)
     });
+    items.push(syn::parse_quote! {
+        pub(crate) struct Globals<P>(::core::marker::PhantomData<fn() -> P>);
+    });
+    let intrinsic_visibility = constructor.then(|| quote!(pub(crate)));
+    let owner = (!constructor).then(|| quote! {
+        pub(crate) const OWNER: crate::builtin::globals::Owner<P> =
+            crate::builtin::globals::Owner::new(ROOT, ROOTS, &[Self::INTRINSICS], Some(install));
+    });
     if constructor {
         items.push(syn::parse_quote! {
             pub(crate) fn install_members(
@@ -952,18 +960,12 @@ pub(super) fn builtin_global(args: TokenStream, item: TokenStream) -> Result<Tok
                 #(#install)*
             }
         });
-        items.push(syn::parse_quote! {
-            pub(crate) const OWNER: crate::builtin::globals::Owner =
-                crate::builtin::globals::Owner::new(ROOT, ROOTS, &[INTRINSICS], Some(install));
-        });
     }
-    items.push(if constructor {
-        syn::parse_quote! {
-            pub(crate) const INTRINSICS: &[crate::intrinsic::IntrinsicDef] = &[#(#descriptors)*];
-        }
-    } else {
-        syn::parse_quote! {
-            const INTRINSICS: &[crate::intrinsic::IntrinsicDef] = &[#(#descriptors)*];
+    items.push(syn::parse_quote! {
+        impl<P: crate::host::PlatformServices> Globals<P> {
+            #intrinsic_visibility const INTRINSICS: &[crate::intrinsic::IntrinsicDef<P>] =
+                &[#(#descriptors)*];
+            #owner
         }
     });
     Ok(quote!(#module))
@@ -1941,7 +1943,12 @@ mod tests {
         .expect("empty builtin namespace should expand")
         .to_string();
         assert!(expanded.contains("pub (crate) const OWNER"));
-        assert!(expanded.contains("Owner :: new (ROOT , ROOTS , & [INTRINSICS] , Some (install))"));
+        assert!(expanded.contains("Globals < P >"));
+        assert!(expanded.contains("IntrinsicDef < P >"));
+        assert!(
+            expanded
+                .contains("Owner :: new (ROOT , ROOTS , & [Self :: INTRINSICS] , Some (install))")
+        );
     }
 
     #[test]

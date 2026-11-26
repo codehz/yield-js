@@ -4,7 +4,7 @@ use crate::binding::Recovery;
 use crate::builtin::roots::BuiltinRoots;
 use crate::error::VmError;
 use crate::heap::{Heap, Object};
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::init::{RestoreOptions, SnapshotValidation};
 use crate::regexp::compile_pattern;
 use crate::runtime::{ContinuationTarget, HostSlot, HostTaskState, Settlement};
@@ -30,15 +30,19 @@ impl VmCore {
     /// Captures an idle VM without releasing any live registrations.
     /// The caller must hold external logical time and delivery at the same cut;
     /// no event may have been taken out of its source but not yet delivered.
-    pub(crate) fn snapshot(&self, host: &Host, roots: &[Value]) -> Result<Snapshot, VmError> {
+    pub(crate) fn snapshot<P: PlatformServices>(
+        &self,
+        host: &Host<P>,
+        roots: &[Value],
+    ) -> Result<Snapshot, VmError> {
         self.capture_image(host, roots, |_| {})
     }
 
     /// Capture through the same path as `snapshot`, timing its phases.
     #[doc(hidden)]
-    pub fn snapshot_profiled(
+    pub fn snapshot_profiled<P: PlatformServices>(
         &self,
-        host: &Host,
+        host: &Host<P>,
         roots: &[Value],
     ) -> Result<(Snapshot, crate::perf::Capture), VmError> {
         use std::time::Instant;
@@ -57,9 +61,9 @@ impl VmCore {
         Ok((snapshot, profile))
     }
 
-    fn capture_image(
+    fn capture_image<P: PlatformServices>(
         &self,
-        host: &Host,
+        host: &Host<P>,
         roots: &[Value],
         mut checkpoint: impl FnMut(fn(&mut crate::perf::Capture) -> &mut std::time::Duration),
     ) -> Result<Snapshot, VmError> {
@@ -325,7 +329,7 @@ impl VmCore {
     }
 }
 
-impl Vm {
+impl<P: PlatformServices> Vm<P> {
     /// Restore a trusted, unmodified snapshot produced by [`Vm::snapshot`].
     ///
     /// The caller must ensure provenance and integrity. Both validation modes
@@ -334,7 +338,7 @@ impl Vm {
     pub fn restore(
         snapshot: Snapshot,
         build: impl TryInto<VerifiedBuild, Error: Into<VmError>>,
-        host: Host,
+        host: Host<P>,
         options: RestoreOptions,
     ) -> Result<Self, VmError> {
         check_snapshot_header(&snapshot)?;
@@ -344,11 +348,15 @@ impl Vm {
         )?;
         let build = build.try_into().map_err(Into::into)?;
         let core = match options.validation {
-            SnapshotValidation::Trusted => {
-                VmCore::restore_image::<false>(snapshot, build, &host, options.test_clock, |_| {})
-            }
+            SnapshotValidation::Trusted => VmCore::restore_image::<false, P>(
+                snapshot,
+                build,
+                &host,
+                options.test_clock,
+                |_| {},
+            ),
             SnapshotValidation::Full => {
-                VmCore::restore_image::<true>(snapshot, build, &host, options.test_clock, |_| {})
+                VmCore::restore_image::<true, P>(snapshot, build, &host, options.test_clock, |_| {})
             }
         }?;
         Ok(Self { core, host })
@@ -359,7 +367,7 @@ impl Vm {
     pub fn restore_profiled(
         snapshot: Snapshot,
         build: VerifiedBuild,
-        host: Host,
+        host: Host<P>,
     ) -> Result<(Self, crate::perf::Restore), VmError> {
         use std::time::Instant;
 
@@ -368,7 +376,7 @@ impl Vm {
         let mut profile = crate::perf::Restore::default();
         check_snapshot_header(&snapshot)?;
         authorize_fetch_environment(&snapshot.fetch_environment, None)?;
-        let core = VmCore::restore_image::<true>(snapshot, build, &host, None, |field| {
+        let core = VmCore::restore_image::<true, P>(snapshot, build, &host, None, |field| {
             let now = Instant::now();
             *field(&mut profile) = now.duration_since(last);
             last = now;
@@ -381,10 +389,10 @@ impl Vm {
 }
 
 impl VmCore {
-    fn restore_image<const AUDIT: bool>(
+    fn restore_image<const AUDIT: bool, P: PlatformServices>(
         mut snapshot: Snapshot,
         build: VerifiedBuild,
-        host: &Host,
+        host: &Host<P>,
         clock: Option<std::sync::Arc<dyn crate::TestClock>>,
         mut checkpoint: impl FnMut(fn(&mut crate::perf::Restore) -> &mut std::time::Duration),
     ) -> Result<Self, VmError> {
@@ -488,8 +496,10 @@ impl VmCore {
                 &snapshot.imports,
             )?;
         }
+        let has_timer = host.platform().timer().is_some();
         let operations = load_operations(
             bindings,
+            has_timer,
             &heap,
             snapshot.elapsed,
             std::mem::take(&mut snapshot.operations),
@@ -512,7 +522,7 @@ impl VmCore {
             )?;
         }
         validate_timers(
-            bindings,
+            has_timer,
             &heap,
             &snapshot.script_timers,
             &snapshot.ordinary_tasks,
@@ -524,7 +534,6 @@ impl VmCore {
         checkpoint(|profile| &mut profile.state_load);
         let mut vm = Self::restored(
             build,
-            bindings,
             crate::vm::RestoredState {
                 heap,
                 continuations,

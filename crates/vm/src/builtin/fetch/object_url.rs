@@ -8,7 +8,7 @@ use url::Url;
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{Heap, Object};
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::runtime::Invocation;
 use crate::value::{ObjectId, Value, ValueRef};
 use crate::vm::VmCore;
@@ -59,9 +59,9 @@ impl ObjectUrls {
     }
 }
 
-pub(crate) fn create(
+pub(crate) fn create<P: PlatformServices>(
     vm: &mut VmCore,
-    _: &Host,
+    _: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     _: &Value,
@@ -89,9 +89,9 @@ pub(crate) fn create(
     }
 }
 
-pub(crate) fn revoke(
+pub(crate) fn revoke<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     _: &Value,

@@ -6,16 +6,16 @@ use crate::console::{
 };
 use crate::gc::ActiveRoots;
 use crate::heap::Property;
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::value::{PropertyKey, ValueRef};
 use crate::vm::VmCore;
 use crate::{JsString, Object, Value};
 
 use super::logging::Completion;
 
-pub(super) fn build(
+pub(super) fn build<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     data: &Value,
     properties: Option<&Value>,

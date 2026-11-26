@@ -309,6 +309,7 @@ pub(super) fn require_promise(heap: &Heap, id: ObjectId, what: &str) -> Result<(
 
 pub(super) fn load_operations(
     bindings: &Bindings,
+    has_timer: bool,
     heap: &Heap,
     elapsed: std::time::Duration,
     records: Vec<PendingOperationRecord>,
@@ -428,7 +429,7 @@ pub(super) fn load_operations(
     if operations
         .values()
         .any(|op| matches!(op.target, DeliveryTarget::Timeout { .. }))
-        && bindings.builtin_services().timer().is_none()
+        && !has_timer
     {
         return Err(VmError::InvalidSnapshot(
             "pending timeout operations require the TimerService".to_owned(),
@@ -439,7 +440,7 @@ pub(super) fn load_operations(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn validate_timers(
-    bindings: &Bindings,
+    has_timer: bool,
     heap: &Heap,
     timers: &BTreeMap<i32, ScriptTimer>,
     tasks: &[OrdinaryTask],
@@ -541,7 +542,7 @@ pub(super) fn validate_timers(
     if matched.len() != timers.len() {
         return Err(invalid());
     }
-    if timers.values().any(|timer| timer.repeat) && bindings.builtin_services().timer().is_none() {
+    if timers.values().any(|timer| timer.repeat) && !has_timer {
         return Err(VmError::InvalidSnapshot(
             "restored intervals require the TimerService".into(),
         ));

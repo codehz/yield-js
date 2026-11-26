@@ -252,10 +252,12 @@ fn explicit_service_registration_rejects_the_wrong_value_type() {
     fixture.write(
         "src/lib.rs",
         r#"use std::sync::Arc;
-use yield_vm::{Host, TimerService, host};
+use yield_vm::{Host, host};
+
+trait CustomService {}
 
 pub fn make_host() -> Result<Host, String> {
-    host! { services: { Arc<dyn TimerService> => 17u64 } }
+    host! { services: { Arc<dyn CustomService> => 17u64 } }
 }
 "#,
     );
@@ -265,7 +267,7 @@ pub fn make_host() -> Result<Host, String> {
         "a value of the wrong service type must fail:\n{output}"
     );
     assert!(
-        output.contains("E0308") && output.contains("TimerService") && output.contains("u64"),
+        output.contains("E0308") && output.contains("CustomService") && output.contains("u64"),
         "{output}"
     );
 }

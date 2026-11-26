@@ -15,7 +15,7 @@ use super::{
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, Object, PlainObject, TO_STRING_TAG_SYMBOL};
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{JsString, ObjectId, PropertyKey, Value, ValueRef};
@@ -30,23 +30,25 @@ const fn key(slot: Slot, member: &'static str) -> IntrinsicKey {
 
 macro_rules! url_members {
     ($($member:literal => $get:ident $(, $set:ident)?;)*) => {
-        const MEMBERS: &[IntrinsicDef] = &[
-            $(IntrinsicDef::call(key(Slot::PrototypeGetter, $member), 0, |vm, _, roots, _, this| {
-                let Some((_, url)) = url_receiver(vm, this)? else { return bad_receiver(vm, roots) };
-                Ok(string(quirks::$get(url)))
-            }),
-            $(IntrinsicDef::call(key(Slot::PrototypeSetter, $member), 1, |vm, host, roots, args, this| {
-                let Some((id, _)) = url_receiver(vm, this)? else { return bad_receiver(vm, roots) };
-                let text = match vm.coerce_string(host, roots, args.first().unwrap_or(&Value::UNDEFINED))? {
-                    Ok(text) => usv_string(&text),
-                    Err(error) => return Ok(Invocation::Thrown(error)),
-                };
-                let Object::Url { url, .. } = vm.heap.get_mut(id)? else { unreachable!() };
-                url_members!(@set vm, roots, url, &text, $set);
-                if matches!($member, "href" | "search") { vm.refresh_search_params(id)?; }
-                Ok(Invocation::Value(Value::UNDEFINED))
-            }),)?)*
-        ];
+        impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+            const MEMBERS: &[IntrinsicDef<P>] = &[
+                $(IntrinsicDef::call(key(Slot::PrototypeGetter, $member), 0, |vm, _, roots, _, this| {
+                    let Some((_, url)) = url_receiver(vm, this)? else { return bad_receiver(vm, roots) };
+                    Ok(string(quirks::$get(url)))
+                }),
+                $(IntrinsicDef::call(key(Slot::PrototypeSetter, $member), 1, |vm, host, roots, args, this| {
+                    let Some((id, _)) = url_receiver(vm, this)? else { return bad_receiver(vm, roots) };
+                    let text = match vm.coerce_string(host, roots, args.first().unwrap_or(&Value::UNDEFINED))? {
+                        Ok(text) => usv_string(&text),
+                        Err(error) => return Ok(Invocation::Thrown(error)),
+                    };
+                    let Object::Url { url, .. } = vm.heap.get_mut(id)? else { unreachable!() };
+                    url_members!(@set vm, roots, url, &text, $set);
+                    if matches!($member, "href" | "search") { vm.refresh_search_params(id)?; }
+                    Ok(Invocation::Value(Value::UNDEFINED))
+                }),)?)*
+            ];
+        }
     };
     (@set $vm:ident, $roots:ident, $url:ident, $text:expr, set_href) => {
         if quirks::set_href($url, $text).is_err() {
@@ -72,91 +74,98 @@ url_members! {
     "hash" => hash, set_hash;
 }
 
-const FUNCTIONS: &[IntrinsicDef] = &[
-    IntrinsicDef::constructor(
-        key(Slot::Global, ""),
-        1,
-        |vm, _, roots, _, _| vm.throw_type_error(roots, "URL constructor requires new"),
-        |vm, host, roots, args, prototype| {
-            parse(vm, host, roots, &args, ParseMode::Construct(prototype))
-        },
-    ),
-    IntrinsicDef::call(
-        key(Slot::Static, "canParse"),
-        1,
-        |vm, host, roots, args, _| parse(vm, host, roots, &args, ParseMode::CanParse),
-    ),
-    IntrinsicDef::call(key(Slot::Static, "parse"), 1, |vm, host, roots, args, _| {
-        parse(vm, host, roots, &args, ParseMode::Parse)
-    }),
-    IntrinsicDef::call(
-        key(Slot::Static, "createObjectURL"),
-        1,
-        super::fetch::object_url::create,
-    ),
-    IntrinsicDef::call(
-        key(Slot::Static, "revokeObjectURL"),
-        1,
-        super::fetch::object_url::revoke,
-    ),
-    IntrinsicDef::call(key(Slot::Prototype, "toString"), 0, stringify),
-    IntrinsicDef::call(key(Slot::Prototype, "toJSON"), 0, stringify),
-    IntrinsicDef::call(
-        key(Slot::PrototypeGetter, "searchParams"),
-        0,
-        |vm, _, roots, _, this| {
-            let Some((id, url)) = url_receiver(vm, this)? else {
-                return bad_receiver(vm, roots);
-            };
-            if let Object::Url {
-                params: Some(params),
-                ..
-            } = vm.heap.get(id)?
-            {
-                return Ok(Invocation::Value(Value::object(*params)));
-            }
-            let pairs = parse_query(url.query().unwrap_or_default());
-            let params = vm.heap.alloc(Object::UrlSearchParams {
-                object: PlainObject::new(Some(vm.builtins.get(params::PROTOTYPE))),
-                pairs,
-                owner: Some(id),
-            });
-            let Object::Url { params: slot, .. } = vm.heap.get_mut(id)? else {
-                unreachable!()
-            };
-            *slot = Some(params);
-            Ok(Invocation::Value(Value::object(params)))
-        },
-    ),
-];
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    const FUNCTIONS: &[IntrinsicDef<P>] = &[
+        IntrinsicDef::constructor(
+            key(Slot::Global, ""),
+            1,
+            |vm, _, roots, _, _| vm.throw_type_error(roots, "URL constructor requires new"),
+            |vm, host, roots, args, prototype| {
+                parse(vm, host, roots, &args, ParseMode::Construct(prototype))
+            },
+        ),
+        IntrinsicDef::call(
+            key(Slot::Static, "canParse"),
+            1,
+            |vm, host, roots, args, _| parse(vm, host, roots, &args, ParseMode::CanParse),
+        ),
+        IntrinsicDef::call(key(Slot::Static, "parse"), 1, |vm, host, roots, args, _| {
+            parse(vm, host, roots, &args, ParseMode::Parse)
+        }),
+        IntrinsicDef::call(
+            key(Slot::Static, "createObjectURL"),
+            1,
+            super::fetch::object_url::create,
+        ),
+        IntrinsicDef::call(
+            key(Slot::Static, "revokeObjectURL"),
+            1,
+            super::fetch::object_url::revoke,
+        ),
+        IntrinsicDef::call(key(Slot::Prototype, "toString"), 0, stringify),
+        IntrinsicDef::call(key(Slot::Prototype, "toJSON"), 0, stringify),
+        IntrinsicDef::call(
+            key(Slot::PrototypeGetter, "searchParams"),
+            0,
+            |vm, _, roots, _, this| {
+                let Some((id, url)) = url_receiver(vm, this)? else {
+                    return bad_receiver(vm, roots);
+                };
+                if let Object::Url {
+                    params: Some(params),
+                    ..
+                } = vm.heap.get(id)?
+                {
+                    return Ok(Invocation::Value(Value::object(*params)));
+                }
+                let pairs = parse_query(url.query().unwrap_or_default());
+                let params = vm.heap.alloc(Object::UrlSearchParams {
+                    object: PlainObject::new(Some(vm.builtins.get(params::PROTOTYPE))),
+                    pairs,
+                    owner: Some(id),
+                });
+                let Object::Url { params: slot, .. } = vm.heap.get_mut(id)? else {
+                    unreachable!()
+                };
+                *slot = Some(params);
+                Ok(Invocation::Value(Value::object(params)))
+            },
+        ),
+    ];
+}
 
-pub(crate) const URL_OWNER: Owner = Owner::new(
-    ROOT,
-    &[
-        RootSpec::new(
-            ROOT,
-            RootKind::Native(key(Slot::Global, "")),
-            FUNCTION_PARENT,
-        )
-        .fixed(PROTOTYPE)
-        .backlink(Some(Attributes::METHOD)),
-        RootSpec::new(PROTOTYPE, RootKind::Plain, OBJECT_PARENT),
-    ],
-    &[FUNCTIONS, MEMBERS],
-    Some(install),
-);
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const URL_OWNER: Owner<P> = Owner::new(
+        ROOT,
+        &[
+            RootSpec::new(
+                ROOT,
+                RootKind::Native(key(Slot::Global, "")),
+                FUNCTION_PARENT,
+            )
+            .fixed(PROTOTYPE)
+            .backlink(Some(Attributes::METHOD)),
+            RootSpec::new(PROTOTYPE, RootKind::Plain, OBJECT_PARENT),
+        ],
+        &[Self::FUNCTIONS, Self::MEMBERS],
+        Some(install),
+    );
+}
 
 fn install(vm: &mut VmCore, _: &Value) {
     let constructor = vm.builtins.get(ROOT);
     let prototype = vm.builtins.get(PROTOTYPE);
     link_constructor(vm, constructor, prototype);
-    for def in MEMBERS.iter().chain(FUNCTIONS) {
+    for def in BuiltinTable::<crate::host::Platform>::MEMBERS
+        .iter()
+        .chain(BuiltinTable::<crate::host::Platform>::FUNCTIONS)
+    {
         let k = def.key;
         match k.slot {
             Slot::PrototypeGetter => {
                 let getter = vm.alloc_intrinsic(k);
                 let setter_key = key(Slot::PrototypeSetter, k.member);
-                let setter = MEMBERS
+                let setter = BuiltinTable::<crate::host::Platform>::MEMBERS
                     .iter()
                     .any(|def| def.key == setter_key)
                     .then(|| vm.alloc_intrinsic(setter_key));
@@ -213,9 +222,9 @@ fn string(text: impl AsRef<str>) -> Invocation {
     Invocation::Value(Value::string(text.as_ref().into()))
 }
 
-fn stringify(
+fn stringify<P: PlatformServices>(
     vm: &mut VmCore,
-    _: &Host,
+    _: &Host<P>,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     this: &Value,
@@ -232,9 +241,9 @@ enum ParseMode {
     Parse,
 }
 
-fn parse(
+fn parse<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: &[Value],
     mode: ParseMode,
@@ -345,3 +354,5 @@ impl VmCore {
         Ok(())
     }
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

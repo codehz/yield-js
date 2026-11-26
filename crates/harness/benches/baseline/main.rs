@@ -7,7 +7,7 @@ use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 use workloads::{REACT_REUSE, REMATERIALIZATION, SNAPSHOT_BUFFER, WORKLOADS, Workload};
-use yield_harness::TestHost;
+use yield_harness::{TestHost, TestVm};
 use yield_vm::{Build, Snapshot, VerifiedBuild, Vm, perf};
 
 const WARMUP_SAMPLES: usize = 2;
@@ -144,7 +144,7 @@ fn run_reuse(workload: &Workload, samples: usize) {
         let build = decode();
         let verified = sample.time("verify_once", || VerifiedBuild::new(build).unwrap());
         let mut totals = [Duration::ZERO; 4];
-        let mut measure = |slot: usize, start: Instant, vm: Vm| {
+        let mut measure = |slot: usize, start: Instant, vm: TestVm| {
             totals[slot] += start.elapsed();
             black_box(vm)
         };

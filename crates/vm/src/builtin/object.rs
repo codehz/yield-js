@@ -1,12 +1,14 @@
 #[yield_binding_macros::builtin_global(name = "Object", root = "object", kind = "constructor")]
 pub(crate) mod members {
+    pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);
+
     use crate::builtin::globals::Owner;
     use crate::builtin::roots::{RootKind, RootSpec};
     use crate::builtin::{FUNCTION_PARENT, link_constructor};
     use crate::error::VmError;
     use crate::gc::ActiveRoots;
     use crate::heap::{IntegrityLevel, string_own_property};
-    use crate::host::Host;
+    use crate::host::{Host, PlatformServices};
     use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
     use crate::ops;
     use crate::runtime::{Arguments, Invocation};
@@ -19,19 +21,28 @@ pub(crate) mod members {
         RootSpec::new(ROOT, RootKind::Native(CONSTRUCTOR), FUNCTION_PARENT)
             .fixed("object.prototype"),
     ];
-    const GLOBAL: &[IntrinsicDef] = &[IntrinsicDef::constructor(
-        CONSTRUCTOR,
-        1,
-        |vm, _, _, args, _| vm.construct_object(&args),
-        |vm, _, _, args, prototype| match prototype {
-            Some(prototype) => Ok(Invocation::Value(Value::object(
-                vm.heap.alloc_plain_with(Some(prototype)),
-            ))),
-            None => vm.construct_object(&args),
-        },
-    )];
+    impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+        const GLOBAL: &[IntrinsicDef<P>] = &[IntrinsicDef::constructor(
+            CONSTRUCTOR,
+            1,
+            |vm, _, _, args, _| vm.construct_object(&args),
+            |vm, _, _, args, prototype| match prototype {
+                Some(prototype) => Ok(Invocation::Value(Value::object(
+                    vm.heap.alloc_plain_with(Some(prototype)),
+                ))),
+                None => vm.construct_object(&args),
+            },
+        )];
+    }
 
-    pub(crate) const OWNER: Owner = Owner::new(ROOT, ROOTS, &[GLOBAL, INTRINSICS], Some(install));
+    impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+        pub(crate) const OWNER: Owner<P> = Owner::new(
+            ROOT,
+            ROOTS,
+            &[Self::GLOBAL, Globals::<P>::INTRINSICS],
+            Some(install),
+        );
+    }
 
     fn install(vm: &mut VmCore, _: &Value) {
         let constructor = vm.builtins.get(ROOT);
@@ -118,9 +129,9 @@ pub(crate) mod members {
         toString: 0 => |vm, host, roots, _, receiver| vm.object_to_string(host, roots, receiver);
     }
 
-    fn test_own_property(
+    fn test_own_property<P: PlatformServices>(
         vm: &mut VmCore,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         receiver: &Value,

@@ -10,7 +10,7 @@ use crate::heap::{
     ByteStreamRange, ElementKind, Heap, Object, OwnedEdge, PromiseState, ReactionJob,
     ReadableState, push_value,
 };
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::runtime::{Invocation, Settlement};
 use crate::value::{ObjectId, PropertyKeyRef, Value, ValueRef};
 use crate::vm::VmCore;
@@ -139,9 +139,9 @@ fn invocation_id(result: Invocation) -> Result<ObjectId, VmError> {
     }
 }
 
-pub(crate) fn tee(
+pub(crate) fn tee<P: PlatformServices>(
     vm: &mut VmCore,
-    _: &Host,
+    _: &Host<P>,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     receiver: &Value,
@@ -227,9 +227,9 @@ impl VmCore {
         )
     }
 
-    pub(super) fn tee_pull(
+    pub(super) fn tee_pull<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         branch: ObjectId,
@@ -239,9 +239,9 @@ impl VmCore {
         self.readable_settled_promise(undefined())
     }
 
-    fn start_tee_read(
+    fn start_tee_read<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         index: usize,
@@ -303,9 +303,9 @@ impl VmCore {
         self.observe_stream_job(promise, StreamJob::Tee(id, TeeJob::Read))
     }
 
-    pub(super) fn tee_cancel(
+    pub(super) fn tee_cancel<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         branch: ObjectId,
@@ -325,9 +325,9 @@ impl VmCore {
         Ok(promise)
     }
 
-    fn cancel_tee_source(
+    fn cancel_tee_source<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         reason: &Value,
@@ -354,9 +354,9 @@ impl VmCore {
         Ok(())
     }
 
-    fn fail_tee(
+    fn fail_tee<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         error: &Value,
@@ -371,9 +371,9 @@ impl VmCore {
         }
     }
 
-    pub(super) fn resume_tee_job(
+    pub(super) fn resume_tee_job<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         job: TeeJob,
@@ -457,9 +457,9 @@ impl VmCore {
         Ok((!tee.finished && tee.reasons[index].is_none()).then_some(tee.branches[index]))
     }
 
-    fn distribute_tee_bytes(
+    fn distribute_tee_bytes<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         byob: Option<usize>,
@@ -501,9 +501,9 @@ impl VmCore {
         Ok(())
     }
 
-    fn enqueue_tee_bytes(
+    fn enqueue_tee_bytes<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         branch: ObjectId,
         chunk: &Value,
@@ -512,9 +512,9 @@ impl VmCore {
         byte_enqueue(self, host, roots, vec![chunk.clone()], &controller)
     }
 
-    fn close_tee(
+    fn close_tee<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         byob: Option<usize>,

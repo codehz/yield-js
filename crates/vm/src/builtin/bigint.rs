@@ -7,7 +7,7 @@ use crate::builtin::globals::Owner;
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{BoxedPrimitive, Object};
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{JsBigInt, Value, ValueRef};
@@ -18,6 +18,8 @@ const PROTOTYPE: &str = "bigint.prototype";
 
 #[yield_binding_macros::builtin_global(name = "BigInt", root = "bigint", kind = "constructor")]
 pub(crate) mod members {
+    pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);
+
     use super::{CONSTRUCTOR, PROTOTYPE};
     use crate::builtin::globals::Owner;
     use crate::builtin::roots::{RootKind, RootSpec};
@@ -26,21 +28,26 @@ pub(crate) mod members {
     use crate::value::{PropertyKey, Value};
     use crate::vm::VmCore;
 
-    pub(crate) const OWNER: Owner = Owner::new(
-        ROOT,
-        &[
-            RootSpec::new(ROOT, RootKind::Native(CONSTRUCTOR), FUNCTION_PARENT).fixed(PROTOTYPE),
-            RootSpec::new(PROTOTYPE, RootKind::Plain, OBJECT_PARENT),
-        ],
-        &[BIGINT_INTRINSICS, INTRINSICS],
-        Some(install),
-    );
+    impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+        pub(crate) const OWNER: Owner<P> = Owner::new(
+            ROOT,
+            &[
+                RootSpec::new(ROOT, RootKind::Native(CONSTRUCTOR), FUNCTION_PARENT)
+                    .fixed(PROTOTYPE),
+                RootSpec::new(PROTOTYPE, RootKind::Plain, OBJECT_PARENT),
+            ],
+            &[Self::BIGINT_INTRINSICS, Globals::<P>::INTRINSICS],
+            Some(install),
+        );
+    }
 
-    pub(crate) const BIGINT_INTRINSICS: &[IntrinsicDef] = &[IntrinsicDef::call(
-        CONSTRUCTOR,
-        1,
-        |vm, host, roots, args, _| vm.call_bigint(host, roots, &args),
-    )];
+    impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+        pub(crate) const BIGINT_INTRINSICS: &[IntrinsicDef<P>] = &[IntrinsicDef::call(
+            CONSTRUCTOR,
+            1,
+            |vm, host, roots, args, _| vm.call_bigint(host, roots, &args),
+        )];
+    }
 
     fn install(vm: &mut VmCore, _: &Value) {
         let constructor = vm.builtins.get(ROOT);
@@ -69,12 +76,14 @@ pub(crate) mod members {
     }
 }
 
-pub(crate) const OWNER: Owner = members::OWNER;
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const OWNER: Owner<P> = members::BuiltinTable::<P>::OWNER;
+}
 
 impl VmCore {
-    fn call_bigint(
+    fn call_bigint<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -88,9 +97,9 @@ impl VmCore {
         }
     }
 
-    fn coerce_bigint(
+    fn coerce_bigint<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Result<Result<JsBigInt, Value>, VmError> {
@@ -136,9 +145,9 @@ impl VmCore {
         Ok(result)
     }
 
-    fn bigint_as_n(
+    fn bigint_as_n<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         signed: bool,
@@ -199,9 +208,9 @@ impl VmCore {
         })
     }
 
-    fn bigint_to_string(
+    fn bigint_to_string<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         args: &[Value],
@@ -285,3 +294,5 @@ fn as_int_n(value: &BigInt, bits: u64, signed: bool) -> BigInt {
     }
     remainder
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

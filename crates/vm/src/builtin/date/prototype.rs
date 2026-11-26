@@ -6,7 +6,7 @@ use crate::error::VmError;
 use crate::exec::Hint;
 use crate::gc::ActiveRoots;
 use crate::heap::Object;
-use crate::host::{Host, TimeService};
+use crate::host::{Host, PlatformServices, TimeService};
 use crate::runtime::{Arguments, Invocation};
 use crate::value::{PropertyKeyRef, Value, ValueRef};
 use crate::vm::VmCore;
@@ -14,9 +14,9 @@ use crate::vm::VmCore;
 const DAY_MS: i64 = 86_400_000;
 const MINUTE_MS: f64 = 60_000.0;
 
-pub(super) fn method(
+pub(super) fn method<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     key: &str,
     receiver: &Value,
@@ -56,7 +56,7 @@ pub(super) fn method(
     };
     if let Some(part) = local_part {
         return Ok(match time {
-            Some(time) => string(text::format_local(time, vm.time(), part)?),
+            Some(time) => string(text::format_local(time, &crate::builtin::time(host), part)?),
             None => string("Invalid Date"),
         });
     }
@@ -80,7 +80,7 @@ pub(super) fn method(
         return Ok(numeric_time(None));
     };
     if key == "getTimezoneOffset" {
-        let offset = offset_ms(time, &vm.time().time_zone())?;
+        let offset = offset_ms(time, &crate::builtin::time(host).time_zone())?;
         return Ok(Invocation::Value(Value::number(
             (-offset) as f64 / MINUTE_MS,
         )));
@@ -89,7 +89,7 @@ pub(super) fn method(
     let f = if utc_field.is_some() {
         fields(time)
     } else {
-        local_fields(time, &vm.time().time_zone())?
+        local_fields(time, &crate::builtin::time(host).time_zone())?
     };
     let value = match utc_field.unwrap_or_else(|| key.strip_prefix("get").unwrap_or(key)) {
         "FullYear" => f.year,
@@ -110,9 +110,9 @@ fn string(value: impl Into<crate::JsString>) -> Invocation {
     Invocation::Value(Value::string(value.into()))
 }
 
-fn to_json(
+fn to_json<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     receiver: &Value,
 ) -> Result<Invocation, VmError> {
@@ -138,9 +138,9 @@ fn to_json(
     }
 }
 
-pub(super) fn to_primitive(
+pub(super) fn to_primitive<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     receiver: &Value,
     hint: &Value,
@@ -209,10 +209,10 @@ impl Setter {
         Some(Self { component, utc })
     }
 
-    fn calculate(
+    fn calculate<P: PlatformServices>(
         self,
         vm: &mut VmCore,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         initial: Option<i64>,
         args: &[Value],
@@ -224,7 +224,8 @@ impl Setter {
             Month | Seconds => 2,
             _ => 1,
         };
-        let wall_time = |clock: &dyn TimeService| -> Result<Option<i64>, VmError> {
+        let clock = crate::builtin::time(host);
+        let wall_time = || -> Result<Option<i64>, VmError> {
             match initial {
                 Some(time) if !self.utc => Ok(Some(time + offset_ms(time, &clock.time_zone())?)),
                 time => Ok(time),
@@ -233,7 +234,7 @@ impl Setter {
         // Invalid year setters start at wall-clock midnight, not LocalTime(0).
         // Annex B establishes the base before coercing the legacy year.
         let mut year_base = if matches!(self.component, LegacyYear) {
-            Some(wall_time(vm.time())?.unwrap_or(0))
+            Some(wall_time()?.unwrap_or(0))
         } else {
             None
         };
@@ -248,7 +249,7 @@ impl Setter {
         // Full-year setters establish the base after the year but before
         // optional coercions.
         if matches!(self.component, Year) {
-            year_base = Some(wall_time(vm.time())?.unwrap_or(0));
+            year_base = Some(wall_time()?.unwrap_or(0));
         }
         // Omitted optional arguments use the base time's fields; explicit
         // undefined is converted to NaN just like any other supplied value.
@@ -261,7 +262,7 @@ impl Setter {
         }
         let Some(wall_time) = (match year_base {
             Some(base) => Some(base),
-            None => wall_time(vm.time())?,
+            None => wall_time()?,
         }) else {
             // A coercion may already have mutated the receiver. Do not write
             // NaN back when the algorithm returns early on the captured slot.
@@ -309,7 +310,7 @@ impl Setter {
         let clipped = if self.utc {
             time_clip(time)
         } else {
-            clip_local(time, vm.time())?
+            clip_local(time, &crate::builtin::time(host))?
         };
         Ok(Ok(Update::Store(clipped)))
     }

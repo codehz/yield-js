@@ -11,7 +11,14 @@ mod registry;
 
 // An empty guest with optional host imports is enough to exercise startup,
 // without introducing a compiler dependency into the macro tests.
-fn start_vm(host: Host, imports: BTreeMap<String, BTreeSet<String>>) -> Vm {
+fn start_vm<P: yield_vm::PlatformServices>(
+    host: Host<P>,
+    imports: BTreeMap<String, BTreeSet<String>>,
+) -> Vm<P> {
+    Vm::new(guest_build(imports, false), host, Default::default()).expect("start guest")
+}
+
+fn guest_build(imports: BTreeMap<String, BTreeSet<String>>, throw_on_evaluate: bool) -> Build {
     let initializer = |func_id, name: &str| {
         let slot = Slot::transient(0);
         Function {
@@ -31,7 +38,14 @@ fn start_vm(host: Host, imports: BTreeMap<String, BTreeSet<String>>) -> Vm {
             arguments_param: None,
             transient_slots: 1,
             persistent_slots: 0,
-            code: vec![Instr::Undefined { dst: slot }, Instr::Return { src: slot }],
+            code: vec![
+                Instr::Undefined { dst: slot },
+                if throw_on_evaluate && name == "evaluate" {
+                    Instr::Throw { src: slot }
+                } else {
+                    Instr::Return { src: slot }
+                },
+            ],
             resumes: vec![],
             generator_start: None,
             generator_resumes: vec![],
@@ -56,7 +70,7 @@ fn start_vm(host: Host, imports: BTreeMap<String, BTreeSet<String>>) -> Vm {
         None,
     );
     build.build_id = build.compute_id();
-    Vm::new(build, host, Default::default()).expect("start guest")
+    build
 }
 
 #[host_class(tag = "Example", methods)]

@@ -15,7 +15,7 @@ use crate::heap::{
     Object, PlainObject, PromiseState, WritableAbort, WritableFlight, WritableRequest,
     WritableSink, WritableState, WritableStreamObject, WritableWriterObject,
 };
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::{Arguments, Invocation, Settlement};
 use crate::value::{ObjectId, Value, ValueRef};
@@ -48,9 +48,9 @@ interface!(WRITABLE_CONTROLLER_OWNER, "writableStreamDefaultController", "Writab
     Prototype "error" 0 => error,
 );
 
-fn construct(
+fn construct<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     target: &Value,
@@ -131,9 +131,9 @@ fn controller_stream(vm: &VmCore, value: &Value) -> Result<Option<ObjectId>, VmE
     })
 }
 
-fn locked(
+fn locked<P: PlatformServices>(
     vm: &mut VmCore,
-    _: &Host,
+    _: &Host<P>,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     this: &Value,
@@ -146,9 +146,9 @@ fn locked(
     )))
 }
 
-fn get_writer(
+fn get_writer<P: PlatformServices>(
     vm: &mut VmCore,
-    _: &Host,
+    _: &Host<P>,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     this: &Value,
@@ -159,9 +159,9 @@ fn get_writer(
     vm.acquire_writable_writer(roots, stream, vm.builtins.get(WRITER_PROTO))
 }
 
-fn construct_writer(
+fn construct_writer<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     target: &Value,
@@ -175,9 +175,9 @@ fn construct_writer(
     vm.acquire_writable_writer(roots, stream, prototype)
 }
 
-fn stream_abort(
+fn stream_abort<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     this: &Value,
@@ -191,9 +191,9 @@ fn stream_abort(
     vm.writable_abort(host, roots, stream, arg(&args, 0))
 }
 
-fn stream_close(
+fn stream_close<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     this: &Value,
@@ -207,9 +207,9 @@ fn stream_close(
     vm.writable_close(host, roots, stream)
 }
 
-fn writer_abort(
+fn writer_abort<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     this: &Value,
@@ -224,9 +224,9 @@ fn writer_abort(
     vm.writable_abort(host, roots, stream, arg(&args, 0))
 }
 
-fn writer_close(
+fn writer_close<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     this: &Value,
@@ -241,9 +241,9 @@ fn writer_close(
     vm.writable_close(host, roots, stream)
 }
 
-fn write(
+fn write<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     this: &Value,
@@ -254,9 +254,9 @@ fn write(
     vm.writable_write(host, roots, writer, arg(&args, 0))
 }
 
-fn release_lock(
+fn release_lock<P: PlatformServices>(
     vm: &mut VmCore,
-    _: &Host,
+    _: &Host<P>,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     this: &Value,
@@ -268,9 +268,9 @@ fn release_lock(
     Ok(Invocation::Value(Value::UNDEFINED))
 }
 
-fn closed(
+fn closed<P: PlatformServices>(
     vm: &mut VmCore,
-    _: &Host,
+    _: &Host<P>,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     this: &Value,
@@ -281,9 +281,9 @@ fn closed(
     Ok(object(vm.writable_writer(writer)?.closed))
 }
 
-fn ready(
+fn ready<P: PlatformServices>(
     vm: &mut VmCore,
-    _: &Host,
+    _: &Host<P>,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     this: &Value,
@@ -294,9 +294,9 @@ fn ready(
     Ok(object(vm.writable_writer(writer)?.ready))
 }
 
-fn desired_size(
+fn desired_size<P: PlatformServices>(
     vm: &mut VmCore,
-    _: &Host,
+    _: &Host<P>,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     this: &Value,
@@ -316,9 +316,9 @@ fn desired_size(
     }))
 }
 
-fn signal(
+fn signal<P: PlatformServices>(
     vm: &mut VmCore,
-    _: &Host,
+    _: &Host<P>,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     this: &Value,
@@ -329,9 +329,9 @@ fn signal(
     Ok(object(vm.writable(stream)?.signal))
 }
 
-fn error(
+fn error<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     this: &Value,
@@ -375,9 +375,9 @@ impl VmCore {
         }
     }
 
-    pub(crate) fn create_writable(
+    pub(crate) fn create_writable<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         prototype: ObjectId,
         sink: WritableSink,
@@ -570,9 +570,9 @@ impl VmCore {
         Ok(())
     }
 
-    pub(crate) fn writable_write(
+    pub(crate) fn writable_write<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         writer: ObjectId,
         chunk: &Value,
@@ -638,9 +638,9 @@ impl VmCore {
         Ok(object(promise))
     }
 
-    pub(crate) fn writable_close(
+    pub(crate) fn writable_close<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
     ) -> Result<Invocation, VmError> {
@@ -667,9 +667,9 @@ impl VmCore {
         Ok(object(p))
     }
 
-    pub(crate) fn writable_abort(
+    pub(crate) fn writable_abort<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         reason: &Value,
@@ -700,9 +700,9 @@ impl VmCore {
         Ok(object(p))
     }
 
-    pub(crate) fn writable_error(
+    pub(crate) fn writable_error<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         error: &Value,
@@ -714,9 +714,9 @@ impl VmCore {
         Ok(())
     }
 
-    fn start_writable_erroring(
+    fn start_writable_erroring<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         error: &Value,
@@ -752,9 +752,9 @@ impl VmCore {
         Ok(())
     }
 
-    fn advance_writable(
+    fn advance_writable<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
     ) -> Result<(), VmError> {
@@ -787,9 +787,9 @@ impl VmCore {
         }
     }
 
-    fn invoke_writable_flight(
+    fn invoke_writable_flight<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         callback: Option<Value>,
@@ -834,9 +834,9 @@ impl VmCore {
         self.observe_stream_job(wait, StreamJob::WritableFlight(stream))
     }
 
-    fn finish_writable_erroring(
+    fn finish_writable_erroring<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
     ) -> Result<(), VmError> {
@@ -881,9 +881,9 @@ impl VmCore {
         Ok(())
     }
 
-    pub(super) fn resume_writable_job(
+    pub(super) fn resume_writable_job<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         job: StreamJob,
         settlement: &Settlement,
@@ -961,3 +961,5 @@ impl VmCore {
         }
     }
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

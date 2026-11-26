@@ -1,26 +1,26 @@
 use yield_compiler::{Compiler, MemoryResolver, Project};
-use yield_harness::{TestHost, build, number, string};
-use yield_vm::{Build, Completion, JsValue, PromiseState, Value, Vm};
+use yield_harness::{TestHost, TestVm, build, number, string};
+use yield_vm::{Build, Completion, JsValue, PromiseState, Value};
 
-type Suspend = fn(&mut Vm, &mut TestHost) -> Vec<Value>;
-type Resume = fn(&mut Vm, &mut TestHost, &[Value]);
+type Suspend = fn(&mut TestVm, &mut TestHost) -> Vec<Value>;
+type Resume = fn(&mut TestVm, &mut TestHost, &[Value]);
 
 pub(super) struct Workload {
     pub(super) name: &'static str,
     pub(super) build: fn() -> Build,
-    pub(super) run: fn(&mut Vm, &mut TestHost),
+    pub(super) run: fn(&mut TestVm, &mut TestHost),
     /// Stops at a verified suspension and returns roots for the timed capture.
-    pub(super) suspend: Option<fn(&mut Vm, &mut TestHost) -> Vec<Value>>,
+    pub(super) suspend: Option<fn(&mut TestVm, &mut TestHost) -> Vec<Value>>,
     /// Continues from original or restored roots. The restore path must rearm
     /// recovered operations before invoking this callback.
-    pub(super) resume: Option<fn(&mut Vm, &mut TestHost, &[Value])>,
+    pub(super) resume: Option<fn(&mut TestVm, &mut TestHost, &[Value])>,
 }
 
 impl Workload {
     const fn new(
         name: &'static str,
         build: fn() -> Build,
-        run: fn(&mut Vm, &mut TestHost),
+        run: fn(&mut TestVm, &mut TestHost),
     ) -> Self {
         Self {
             name,
@@ -59,11 +59,11 @@ pub(super) const SNAPSHOT_BUFFER: Workload = Workload::new(
 
 const SNAPSHOT_BUFFER_LABEL: &str = "wait:baseline-buffer";
 
-fn suspend_snapshot_buffer(vm: &mut Vm, host: &mut TestHost) -> Vec<Value> {
+fn suspend_snapshot_buffer(vm: &mut TestVm, host: &mut TestHost) -> Vec<Value> {
     suspend_pending(vm, host, "run", SNAPSHOT_BUFFER_LABEL)
 }
 
-fn resume_snapshot_buffer(vm: &mut Vm, host: &mut TestHost, roots: &[Value]) {
+fn resume_snapshot_buffer(vm: &mut TestVm, host: &mut TestHost, roots: &[Value]) {
     finish_pending(
         vm,
         host,
@@ -167,15 +167,15 @@ fn build_rematerialization() -> Build {
     build(include_str!("rematerialization.js"))
 }
 
-fn suspend_literal_saved(vm: &mut Vm, host: &mut TestHost) -> Vec<Value> {
+fn suspend_literal_saved(vm: &mut TestVm, host: &mut TestHost) -> Vec<Value> {
     suspend_pending(vm, host, "saved", LITERAL_LABEL)
 }
 
-fn suspend_literal_reloaded(vm: &mut Vm, host: &mut TestHost) -> Vec<Value> {
+fn suspend_literal_reloaded(vm: &mut TestVm, host: &mut TestHost) -> Vec<Value> {
     suspend_pending(vm, host, "reloaded", LITERAL_LABEL)
 }
 
-fn resume_literal(vm: &mut Vm, host: &mut TestHost, roots: &[Value]) {
+fn resume_literal(vm: &mut TestVm, host: &mut TestHost, roots: &[Value]) {
     finish_pending(
         vm,
         host,
@@ -187,17 +187,17 @@ fn resume_literal(vm: &mut Vm, host: &mut TestHost, roots: &[Value]) {
 }
 
 #[track_caller]
-fn start(vm: &mut Vm, entry: &str, args: Vec<JsValue>) -> Value {
+fn start(vm: &mut TestVm, entry: &str, args: Vec<JsValue>) -> Value {
     vm.start(entry, args)
         .unwrap_or_else(|error| panic!("{entry}: {error}"))
 }
 
 #[track_caller]
-fn assert_number(vm: &mut Vm, entry: &str, args: Vec<JsValue>, expected: f64) {
+fn assert_number(vm: &mut TestVm, entry: &str, args: Vec<JsValue>, expected: f64) {
     assert_eq!(start(vm, entry, args), Value::number(expected), "{entry}");
 }
 
-fn numeric_branch(vm: &mut Vm, _: &mut TestHost) {
+fn numeric_branch(vm: &mut TestVm, _: &mut TestHost) {
     assert_number(vm, "run", vec![number(3.0)], 259_584.0);
     // The same arithmetic sites must also coerce a non-Number operand.
     assert_number(vm, "run", vec![string("5")], 258_560.0);
@@ -233,7 +233,7 @@ pub(super) fn build_react_with_options(options: &Compiler) -> Build {
         .expect("React fixture compiles")
 }
 
-fn react_commit(vm: &mut Vm, host: &mut TestHost) {
+fn react_commit(vm: &mut TestVm, host: &mut TestHost) {
     vm.run_until_idle().expect("drain React microtasks");
     host.advance(vm, 10).expect("deliver React scheduler work");
     assert!(
@@ -243,13 +243,13 @@ fn react_commit(vm: &mut Vm, host: &mut TestHost) {
     );
 }
 
-fn react_first_commit(vm: &mut Vm, host: &mut TestHost) {
+fn react_first_commit(vm: &mut TestVm, host: &mut TestHost) {
     start(vm, "first", vec![]);
     react_commit(vm, host);
     assert_number(vm, "checkFirst", vec![], 1.0);
 }
 
-fn react_updates(vm: &mut Vm, host: &mut TestHost) {
+fn react_updates(vm: &mut TestVm, host: &mut TestHost) {
     // The first run on a VM mounts the root; warm runs update that same root.
     if start(vm, "hasUpdateRoot", vec![]) == Value::number(0.0) {
         start(vm, "mountUpdates", vec![]);
@@ -267,7 +267,7 @@ fn react_updates(vm: &mut Vm, host: &mut TestHost) {
 const AWAIT_LABEL: &str = "wait:baseline-await";
 const GENERATOR_LABEL: &str = "wait:baseline-generator";
 
-fn suspend_pending(vm: &mut Vm, host: &mut TestHost, entry: &str, label: &str) -> Vec<Value> {
+fn suspend_pending(vm: &mut TestVm, host: &mut TestHost, entry: &str, label: &str) -> Vec<Value> {
     let result = start(vm, entry, vec![]);
     vm.run_until_idle().expect("drain to host wait");
     assert_eq!(host.pending_labels(), [label]);
@@ -279,7 +279,7 @@ fn suspend_pending(vm: &mut Vm, host: &mut TestHost, entry: &str, label: &str) -
 }
 
 fn finish_pending(
-    vm: &mut Vm,
+    vm: &mut TestVm,
     host: &mut TestHost,
     roots: &[Value],
     label: &str,
@@ -307,11 +307,11 @@ fn build_await() -> Build {
     build(include_str!("await.js"))
 }
 
-fn suspend_await_success(vm: &mut Vm, host: &mut TestHost) -> Vec<Value> {
+fn suspend_await_success(vm: &mut TestVm, host: &mut TestHost) -> Vec<Value> {
     suspend_pending(vm, host, "success", AWAIT_LABEL)
 }
 
-fn resume_await_success(vm: &mut Vm, host: &mut TestHost, roots: &[Value]) {
+fn resume_await_success(vm: &mut TestVm, host: &mut TestHost, roots: &[Value]) {
     finish_pending(
         vm,
         host,
@@ -322,11 +322,11 @@ fn resume_await_success(vm: &mut Vm, host: &mut TestHost, roots: &[Value]) {
     );
 }
 
-fn suspend_await_reject(vm: &mut Vm, host: &mut TestHost) -> Vec<Value> {
+fn suspend_await_reject(vm: &mut TestVm, host: &mut TestHost) -> Vec<Value> {
     suspend_pending(vm, host, "rejectInFinally", AWAIT_LABEL)
 }
 
-fn resume_await_reject(vm: &mut Vm, host: &mut TestHost, roots: &[Value]) {
+fn resume_await_reject(vm: &mut TestVm, host: &mut TestHost, roots: &[Value]) {
     finish_pending(
         vm,
         host,
@@ -341,15 +341,15 @@ fn build_generators() -> Build {
     build(include_str!("generators.js"))
 }
 
-fn suspend_sync_generator(vm: &mut Vm, host: &mut TestHost) -> Vec<Value> {
+fn suspend_sync_generator(vm: &mut TestVm, host: &mut TestHost) -> Vec<Value> {
     suspend_pending(vm, host, "sync", GENERATOR_LABEL)
 }
 
-fn suspend_async_generator(vm: &mut Vm, host: &mut TestHost) -> Vec<Value> {
+fn suspend_async_generator(vm: &mut TestVm, host: &mut TestHost) -> Vec<Value> {
     suspend_pending(vm, host, "asyncGenerator", GENERATOR_LABEL)
 }
 
-fn resume_generator(vm: &mut Vm, host: &mut TestHost, roots: &[Value]) {
+fn resume_generator(vm: &mut TestVm, host: &mut TestHost, roots: &[Value]) {
     finish_pending(
         vm,
         host,

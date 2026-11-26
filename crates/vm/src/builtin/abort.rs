@@ -10,7 +10,7 @@ use crate::heap::{
     AbortSignalState, AbortStep, Attributes, EventListener, EventState, EventTargetState, Object,
     PlainObject, TO_STRING_TAG_SYMBOL,
 };
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{ObjectId, PropertyKey, Value, ValueRef};
@@ -52,94 +52,110 @@ const SIGNAL_ROOTS: &[RootSpec] = &[
         .backlink(Some(Attributes::METHOD)),
     RootSpec::new(SIGNAL_PROTOTYPE, RootKind::Plain, Some(TARGET_PROTOTYPE)),
 ];
-const CONTROLLER_MEMBERS: &[IntrinsicDef] = &[
-    IntrinsicDef::constructor_with_target(
-        CONTROLLER,
-        0,
-        |vm, _, roots, _, _| vm.throw_type_error(roots, "AbortController requires new"),
-        construct_controller,
-    ),
-    IntrinsicDef::call(
-        GET_SIGNAL,
-        0,
-        |vm, _, roots, _, receiver| match controller_signal(vm, receiver)? {
-            Some(signal) => Ok(Invocation::Value(Value::object(signal))),
-            None => vm.throw_type_error(roots, "Incompatible AbortController receiver"),
-        },
-    ),
-    IntrinsicDef::call(ABORT, 0, |vm, host, roots, args, receiver| {
-        let Some(signal) = controller_signal(vm, receiver)? else {
-            return vm.throw_type_error(roots, "Incompatible AbortController receiver");
-        };
-        vm.abort_signal(host, roots, signal, first_argument(args))?;
-        Ok(Invocation::Value(Value::UNDEFINED))
-    }),
-];
-const SIGNAL_MEMBERS: &[IntrinsicDef] = &[
-    IntrinsicDef::constructor_with_target(
-        SIGNAL,
-        0,
-        |vm, _, roots, _, _| vm.throw_type_error(roots, "Illegal AbortSignal constructor"),
-        |vm, _, roots, _, _| vm.throw_type_error(roots, "Illegal AbortSignal constructor"),
-    ),
-    IntrinsicDef::call(STATIC_ABORT, 0, |vm, _, _, args, _| {
-        let reason = vm.normalize_abort_reason(first_argument(args));
-        Ok(Invocation::Value(Value::object(vm.alloc_abort_signal(
-            AbortSignalState {
-                reason: Some(reason),
-                ..AbortSignalState::default()
-            },
-        ))))
-    }),
-    IntrinsicDef::call(ANY, 1, signal_any),
-    IntrinsicDef::call(TIMEOUT, 1, signal_timeout),
-    IntrinsicDef::call(ABORTED, 0, |vm, _, roots, _, receiver| {
-        read_signal(vm, roots, receiver, |state| {
-            Invocation::Value(Value::boolean(state.reason.is_some()))
-        })
-    }),
-    IntrinsicDef::call(REASON, 0, |vm, _, roots, _, receiver| {
-        read_signal(vm, roots, receiver, |state| {
-            Invocation::Value(state.reason.clone().unwrap_or(Value::UNDEFINED))
-        })
-    }),
-    IntrinsicDef::call(GET_ONABORT, 0, get_onabort),
-    IntrinsicDef::call(SET_ONABORT, 1, set_onabort),
-    IntrinsicDef::call(THROW_IF_ABORTED, 0, |vm, _, roots, _, receiver| {
-        read_signal(vm, roots, receiver, |state| match &state.reason {
-            Some(reason) => Invocation::Thrown(reason.clone()),
-            None => Invocation::Value(Value::UNDEFINED),
-        })
-    }),
-];
-
-pub(crate) const CONTROLLER_OWNER: Owner = Owner::new(
-    CONTROLLER_ROOT,
-    CONTROLLER_ROOTS,
-    &[CONTROLLER_MEMBERS],
-    Some(|vm, _| {
-        install(
-            vm,
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    const CONTROLLER_MEMBERS: &[IntrinsicDef<P>] = &[
+        IntrinsicDef::constructor_with_target(
             CONTROLLER,
-            CONTROLLER_ROOT,
-            CONTROLLER_PROTOTYPE,
-            CONTROLLER_MEMBERS,
-        )
-    }),
-);
-pub(crate) const SIGNAL_OWNER: Owner = Owner::new(
-    SIGNAL_ROOT,
-    SIGNAL_ROOTS,
-    &[SIGNAL_MEMBERS],
-    Some(|vm, _| install(vm, SIGNAL, SIGNAL_ROOT, SIGNAL_PROTOTYPE, SIGNAL_MEMBERS)),
-);
+            0,
+            |vm, _, roots, _, _| vm.throw_type_error(roots, "AbortController requires new"),
+            construct_controller,
+        ),
+        IntrinsicDef::call(
+            GET_SIGNAL,
+            0,
+            |vm, _, roots, _, receiver| match controller_signal(vm, receiver)? {
+                Some(signal) => Ok(Invocation::Value(Value::object(signal))),
+                None => vm.throw_type_error(roots, "Incompatible AbortController receiver"),
+            },
+        ),
+        IntrinsicDef::call(ABORT, 0, |vm, host, roots, args, receiver| {
+            let Some(signal) = controller_signal(vm, receiver)? else {
+                return vm.throw_type_error(roots, "Incompatible AbortController receiver");
+            };
+            vm.abort_signal(host, roots, signal, first_argument(args))?;
+            Ok(Invocation::Value(Value::UNDEFINED))
+        }),
+    ];
+}
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    const SIGNAL_MEMBERS: &[IntrinsicDef<P>] = &[
+        IntrinsicDef::constructor_with_target(
+            SIGNAL,
+            0,
+            |vm, _, roots, _, _| vm.throw_type_error(roots, "Illegal AbortSignal constructor"),
+            |vm, _, roots, _, _| vm.throw_type_error(roots, "Illegal AbortSignal constructor"),
+        ),
+        IntrinsicDef::call(STATIC_ABORT, 0, |vm, _, _, args, _| {
+            let reason = vm.normalize_abort_reason(first_argument(args));
+            Ok(Invocation::Value(Value::object(vm.alloc_abort_signal(
+                AbortSignalState {
+                    reason: Some(reason),
+                    ..AbortSignalState::default()
+                },
+            ))))
+        }),
+        IntrinsicDef::call(ANY, 1, signal_any),
+        IntrinsicDef::call(TIMEOUT, 1, signal_timeout),
+        IntrinsicDef::call(ABORTED, 0, |vm, _, roots, _, receiver| {
+            read_signal(vm, roots, receiver, |state| {
+                Invocation::Value(Value::boolean(state.reason.is_some()))
+            })
+        }),
+        IntrinsicDef::call(REASON, 0, |vm, _, roots, _, receiver| {
+            read_signal(vm, roots, receiver, |state| {
+                Invocation::Value(state.reason.clone().unwrap_or(Value::UNDEFINED))
+            })
+        }),
+        IntrinsicDef::call(GET_ONABORT, 0, get_onabort),
+        IntrinsicDef::call(SET_ONABORT, 1, set_onabort),
+        IntrinsicDef::call(THROW_IF_ABORTED, 0, |vm, _, roots, _, receiver| {
+            read_signal(vm, roots, receiver, |state| match &state.reason {
+                Some(reason) => Invocation::Thrown(reason.clone()),
+                None => Invocation::Value(Value::UNDEFINED),
+            })
+        }),
+    ];
+}
 
-fn install(
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const CONTROLLER_OWNER: Owner<P> = Owner::new(
+        CONTROLLER_ROOT,
+        CONTROLLER_ROOTS,
+        &[Self::CONTROLLER_MEMBERS],
+        Some(|vm, _| {
+            install(
+                vm,
+                CONTROLLER,
+                CONTROLLER_ROOT,
+                CONTROLLER_PROTOTYPE,
+                Self::CONTROLLER_MEMBERS,
+            )
+        }),
+    );
+}
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const SIGNAL_OWNER: Owner<P> = Owner::new(
+        SIGNAL_ROOT,
+        SIGNAL_ROOTS,
+        &[Self::SIGNAL_MEMBERS],
+        Some(|vm, _| {
+            install(
+                vm,
+                SIGNAL,
+                SIGNAL_ROOT,
+                SIGNAL_PROTOTYPE,
+                Self::SIGNAL_MEMBERS,
+            )
+        }),
+    );
+}
+
+fn install<P: crate::host::PlatformServices>(
     vm: &mut VmCore,
     key: IntrinsicKey,
     root: &'static str,
     prototype: &'static str,
-    members: &[IntrinsicDef],
+    members: &[IntrinsicDef<P>],
 ) {
     let constructor = vm.builtins.get(root);
     let prototype = vm.builtins.get(prototype);
@@ -184,9 +200,9 @@ fn first_argument(args: Vec<Value>) -> Value {
     args.into_iter().next().unwrap_or(Value::UNDEFINED)
 }
 
-fn construct_controller(
+fn construct_controller<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     new_target: &Value,
@@ -234,9 +250,9 @@ fn read_signal(
     vm.throw_type_error(roots, "Incompatible AbortSignal receiver")
 }
 
-fn get_onabort(
+fn get_onabort<P: PlatformServices>(
     vm: &mut VmCore,
-    _: &Host,
+    _: &Host<P>,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     receiver: &Value,
@@ -254,9 +270,9 @@ fn get_onabort(
     vm.throw_type_error(roots, "Incompatible AbortSignal receiver")
 }
 
-fn set_onabort(
+fn set_onabort<P: PlatformServices>(
     vm: &mut VmCore,
-    _: &Host,
+    _: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -308,9 +324,9 @@ fn set_onabort(
     Ok(Invocation::Value(Value::UNDEFINED))
 }
 
-fn signal_timeout(
+fn signal_timeout<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     _: &Value,
@@ -324,7 +340,7 @@ fn signal_timeout(
     if !(0.0..=MAX_DELAY).contains(&delay) {
         return vm.throw_type_error(roots, "AbortSignal.timeout delay is out of range");
     }
-    if host.builtin_services().timer().is_none() {
+    if host.platform().timer().is_none() {
         return Ok(Invocation::Thrown(vm.alloc_dom_exception(
             "NotSupportedError".into(),
             "Timer service is not available".into(),
@@ -336,9 +352,9 @@ fn signal_timeout(
     Ok(Invocation::Value(Value::object(signal)))
 }
 
-fn signal_any(
+fn signal_any<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     _: &Value,
@@ -449,9 +465,9 @@ impl VmCore {
         }
     }
 
-    pub(crate) fn abort_signal(
+    pub(crate) fn abort_signal<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         reason: Value,
@@ -534,3 +550,5 @@ impl VmCore {
         Ok(())
     }
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

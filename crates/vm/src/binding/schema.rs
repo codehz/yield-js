@@ -14,11 +14,9 @@ use serde::{Deserialize, Serialize};
 use super::call::{CallCx, JsValue};
 use super::codec::{Decode, Encode, decode_exact};
 use super::services::{
-    BuiltinOffsets, BuiltinServices, ResolvedServices, ServiceDependency, ServiceOwner,
-    ServiceStorage, Services,
+    ResolvedServices, ServiceDependency, ServiceOwner, ServiceStorage, Services,
 };
 use crate::digest::Digest;
-use crate::host::Host;
 use crate::value::{JsString, PropertyKey, SymbolId, Value};
 
 pub type ClassId = usize;
@@ -734,7 +732,7 @@ pub mod __macro_support {
     pub use super::super::services::{
         ServiceDependency, ServiceField, ServiceOwner, ServiceStorage,
     };
-    use super::{AccessorCall, CodecError, Host, ResolvedServices, UnlinkedBindings};
+    use super::{AccessorCall, CodecError, ResolvedServices, UnlinkedBindings};
     pub use super::{
         AccessorDecl, ArgKind, CallSignature, CpsBoundary, CpsStage, ExportDecl, MemberName,
         MethodDecl, ModuleDecl, ResumeCall, ReturnKind,
@@ -742,6 +740,7 @@ pub mod __macro_support {
     use super::{ClassDecl, HostClass, ModuleExports, OperationDecl, OperationDriver, StateDecl};
     use super::{ConstValue, ConstantDecl, FunctionDecl, HostCall};
     use super::{ExportCall, ModuleCall};
+    use crate::host::{Host, PlatformServices};
 
     #[derive(Default)]
     pub struct ModuleDependencies {
@@ -765,11 +764,12 @@ pub mod __macro_support {
         }
     }
 
-    pub fn link(
+    pub fn link<P: PlatformServices>(
         modules: impl IntoIterator<Item = ModuleDecl>,
         deps: ModuleDependencies,
         services: ServiceStorage,
-    ) -> Result<Host, String> {
+        platform: P,
+    ) -> Result<Host<P>, String> {
         UnlinkedBindings {
             modules: modules.into_iter().collect(),
             classes: deps.classes,
@@ -777,10 +777,14 @@ pub mod __macro_support {
             services,
         }
         .build()
-        .map(Host::linked)
+        .map(|bindings| Host::linked(bindings, platform))
     }
 
-    pub fn decode_operation(host: &Host, name: &str, bytes: &[u8]) -> Result<(), CodecError> {
+    pub fn decode_operation<P: PlatformServices>(
+        host: &Host<P>,
+        name: &str,
+        bytes: &[u8],
+    ) -> Result<(), CodecError> {
         host.bindings().decode_operation(name, bytes)
     }
 
@@ -930,7 +934,6 @@ pub(crate) struct Bindings {
     classes: Vec<ClassDecl>,
     operations: Vec<OperationDecl>,
     services: ServiceStorage,
-    builtin_services: BuiltinOffsets,
     fingerprint: String,
 }
 
@@ -949,24 +952,17 @@ impl std::fmt::Debug for Bindings {
 impl Bindings {
     pub(crate) fn empty() -> Self {
         let services = ServiceStorage::default();
-        let builtin_services = BuiltinOffsets::resolve(&services);
         Self {
             modules: Vec::new(),
             classes: Vec::new(),
             operations: Vec::new(),
             services,
-            builtin_services,
             fingerprint: fingerprint(&[], &[], &[]),
         }
     }
 
     pub(crate) fn bind_service<T: Any>(&self) -> Option<&T> {
         self.services.bind::<T>()
-    }
-
-    pub(crate) fn builtin_services(&self) -> BuiltinServices<'_> {
-        // SAFETY: these offsets were resolved against this immutable storage.
-        unsafe { self.builtin_services.bind(&self.services) }
     }
 
     fn service_view<'a>(&'a self, services: &'a ResolvedServices) -> Services<'a> {
@@ -1430,13 +1426,11 @@ impl UnlinkedBindings {
                 })?;
         }
         let fingerprint = fingerprint(&self.modules, &self.classes, &self.operations);
-        let builtin_services = BuiltinOffsets::resolve(&self.services);
         Ok(Bindings {
             modules: self.modules,
             classes: self.classes,
             operations: self.operations,
             services: self.services,
-            builtin_services,
             fingerprint,
         })
     }

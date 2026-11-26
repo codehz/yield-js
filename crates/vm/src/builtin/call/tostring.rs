@@ -4,14 +4,14 @@ use super::UNDEFINED_VALUE;
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{BoxedPrimitive, Object, TO_STRING_TAG_SYMBOL};
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::runtime::{Arguments, Invocation};
 use crate::value::{JsString, ObjectId, PropertyKeyRef, Value, ValueRef};
 use crate::vm::VmCore;
 impl VmCore {
-    pub(crate) fn array_to_string(
+    pub(crate) fn array_to_string<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
     ) -> Result<Invocation, VmError> {
@@ -44,9 +44,9 @@ impl VmCore {
         }
     }
 
-    pub(crate) fn object_to_string(
+    pub(crate) fn object_to_string<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
     ) -> Result<Invocation, VmError> {
@@ -121,9 +121,9 @@ impl VmCore {
         })
     }
 
-    pub(crate) fn array_join(
+    pub(crate) fn array_join<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         args: &[Value],

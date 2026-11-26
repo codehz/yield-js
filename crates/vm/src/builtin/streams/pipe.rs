@@ -11,7 +11,7 @@ use crate::heap::{
     Heap, Object, OwnedEdge, PromiseState, Property, ReactionJob, ReadableState, WritableState,
     push_value,
 };
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::runtime::{Invocation, Settlement};
 use crate::value::{ObjectId, PropertyKeyRef, Value, ValueRef};
 use crate::vm::VmCore;
@@ -199,9 +199,9 @@ impl PipeRecord {
     }
 }
 
-pub(super) fn pipe_to(
+pub(super) fn pipe_to<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -216,9 +216,9 @@ pub(super) fn pipe_to(
     }
 }
 
-pub(super) fn pipe_through(
+pub(super) fn pipe_through<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -226,9 +226,9 @@ pub(super) fn pipe_through(
     pipe_call(vm, host, roots, &args, receiver, true)
 }
 
-fn pipe_call(
+fn pipe_call<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: &[Value],
     receiver: &Value,
@@ -330,9 +330,9 @@ impl VmCore {
         }
     }
 
-    fn start_stream_pipe(
+    fn start_stream_pipe<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         source: ObjectId,
         destination: ObjectId,
@@ -432,9 +432,9 @@ impl VmCore {
         Ok(None)
     }
 
-    fn pump_pipe(
+    fn pump_pipe<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
     ) -> Result<(), VmError> {
@@ -456,9 +456,9 @@ impl VmCore {
         self.observe_pipe(ready, target, PipeStage::Ready)
     }
 
-    pub(crate) fn abort_stream_pipe(
+    pub(crate) fn abort_stream_pipe<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
         reason: &Value,
@@ -471,9 +471,9 @@ impl VmCore {
         )
     }
 
-    fn stop_pipe(
+    fn stop_pipe<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
         stop: Stop,
@@ -509,9 +509,9 @@ impl VmCore {
         })
     }
 
-    fn resume_pipe_shutdown(
+    fn resume_pipe_shutdown<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
     ) -> Result<(), VmError> {
@@ -546,9 +546,9 @@ impl VmCore {
         }
     }
 
-    fn perform_pipe_actions(
+    fn perform_pipe_actions<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
     ) -> Result<(), VmError> {
@@ -655,9 +655,9 @@ impl VmCore {
         )
     }
 
-    pub(crate) fn run_pipe_job(
+    pub(crate) fn run_pipe_job<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
         stage: PipeStage,

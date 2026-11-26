@@ -13,7 +13,7 @@ use crate::builtin::{
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, ITERATOR_SYMBOL, Object, PlainObject, TO_STRING_TAG_SYMBOL};
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::{Arguments, Invocation};
 use crate::value::{ObjectId, PropertyKey, Value, ValueRef};
@@ -82,18 +82,20 @@ macro_rules! methods {
         const METHODS: &[(&str, IntrinsicKey)] = &[
             $(($name, IntrinsicKey::new(NAME, Slot::Prototype, $name))),+
         ];
-        const INTRINSICS: &[IntrinsicDef] = &[
-            IntrinsicDef::constructor(CONSTRUCTOR, 0,
-                |vm, _, roots, _, _| vm.throw_type_error(roots, "FormData requires new"),
-                |vm, _, roots, args, prototype| vm.construct_form_data(roots, &args, prototype),
-            ),
-            IntrinsicDef::call(NEXT, 0, |vm, _, roots, _, receiver| vm.form_data_next(roots, receiver)),
-            $(IntrinsicDef::call(IntrinsicKey::new(NAME, Slot::Prototype, $name), $length,
-                |vm, host, roots, args, receiver| {
-                    vm.form_data_method(host, roots, receiver, &args, $method, $length)
-                },
-            )),+
-        ];
+        impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+            const INTRINSICS: &[IntrinsicDef<P>] = &[
+                IntrinsicDef::constructor(CONSTRUCTOR, 0,
+                    |vm, _, roots, _, _| vm.throw_type_error(roots, "FormData requires new"),
+                    |vm, _, roots, args, prototype| vm.construct_form_data(roots, &args, prototype),
+                ),
+                IntrinsicDef::call(NEXT, 0, |vm, _, roots, _, receiver| vm.form_data_next(roots, receiver)),
+                $(IntrinsicDef::call(IntrinsicKey::new(NAME, Slot::Prototype, $name), $length,
+                    |vm, host, roots, args, receiver| {
+                        vm.form_data_method(host, roots, receiver, &args, $method, $length)
+                    },
+                )),+
+            ];
+        }
     };
 }
 
@@ -110,7 +112,10 @@ methods! {
     Method::ForEach => "forEach" / 1,
 }
 
-pub(crate) const FORM_DATA_OWNER: Owner = Owner::new(ROOT, ROOTS, &[INTRINSICS], Some(install));
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const FORM_DATA_OWNER: Owner<P> =
+        Owner::new(ROOT, ROOTS, &[Self::INTRINSICS], Some(install));
+}
 
 fn install(vm: &mut VmCore, _: &Value) {
     let prototype = vm.builtins.get(PROTOTYPE);
@@ -175,9 +180,9 @@ impl VmCore {
         })
     }
 
-    fn form_data_usv(
+    fn form_data_usv<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Result<Result<String, Value>, VmError> {
@@ -188,9 +193,9 @@ impl VmCore {
         }))
     }
 
-    fn form_data_entry_value(
+    fn form_data_entry_value<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         value: &Value,
         filename: Option<&Value>,
@@ -228,14 +233,14 @@ impl VmCore {
         let data = FileData {
             blob,
             name,
-            last_modified: last_modified.unwrap_or_else(|| blob_now(self.time())),
+            last_modified: last_modified.unwrap_or_else(|| blob_now(&crate::builtin::time(host))),
         };
         Ok(Ok(FormDataValue::File(alloc_file(self, data))))
     }
 
-    fn form_data_method(
+    fn form_data_method<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         args: &[Value],
@@ -328,9 +333,9 @@ impl VmCore {
         Ok(Invocation::Value(result))
     }
 
-    fn form_data_for_each(
+    fn form_data_for_each<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         id: ObjectId,
@@ -401,3 +406,5 @@ impl VmCore {
         self.iterator_result(value, false)
     }
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

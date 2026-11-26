@@ -7,7 +7,7 @@ use std::time::Duration;
 use crate::binding::{HostFault, OperationToken};
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::runtime::{Arguments, Invocation, PendingOperation};
 use crate::snapshot::{
     DeliveryTarget, OrdinaryTask, ScriptTimer, TIMEOUT_OPERATION_NAME, TIMEOUT_OPERATION_REJECTION,
@@ -19,7 +19,11 @@ use super::VmCore;
 
 impl VmCore {
     /// Delivers a one-shot timer wake without executing guest code.
-    pub fn wake_timer(&mut self, host: &Host, token: OperationToken) -> Result<(), VmError> {
+    pub fn wake_timer<P: PlatformServices>(
+        &mut self,
+        host: &Host<P>,
+        token: OperationToken,
+    ) -> Result<(), VmError> {
         if token.epoch != self.epoch {
             return Ok(());
         }
@@ -94,9 +98,9 @@ impl VmCore {
         }
     }
 
-    pub(super) fn arm_new_timeout(
+    pub(super) fn arm_new_timeout<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         target: TimerTarget,
         deadline: Duration,
         delay_ms: u64,
@@ -144,9 +148,9 @@ impl VmCore {
         }
     }
 
-    pub(crate) fn schedule_script_timer(
+    pub(crate) fn schedule_script_timer<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         id: i32,
         callback: Value,
         arguments: Vec<Value>,
@@ -169,9 +173,9 @@ impl VmCore {
         Ok(())
     }
 
-    fn arm_script_timer(
+    fn arm_script_timer<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         id: i32,
         period: u32,
     ) -> Result<(u64, u32, TimerState), HostFault> {
@@ -220,7 +224,11 @@ impl VmCore {
         }
     }
 
-    pub(super) fn run_script_timer(&mut self, host: &Host, key: TimerKey) -> Result<(), VmError> {
+    pub(super) fn run_script_timer<P: PlatformServices>(
+        &mut self,
+        host: &Host<P>,
+        key: TimerKey,
+    ) -> Result<(), VmError> {
         let Some(timer) = self
             .script_timers
             .get(&key.id)
@@ -261,7 +269,11 @@ impl VmCore {
         result
     }
 
-    fn finish_script_timer(&mut self, host: &Host, key: TimerKey) -> Result<(), VmError> {
+    fn finish_script_timer<P: PlatformServices>(
+        &mut self,
+        host: &Host<P>,
+        key: TimerKey,
+    ) -> Result<(), VmError> {
         let Some(timer) = self
             .script_timers
             .get(&key.id)

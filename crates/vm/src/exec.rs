@@ -20,7 +20,7 @@ use crate::heap::{
     OwnPropertyLookup, PlainObject, PrivateElement, Property, TO_PRIMITIVE_SYMBOL, TypedIndex,
     object_id, string_own_property,
 };
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot as IntrinsicSlot};
 use crate::ops::{self, BinaryError, unary_op};
 use crate::resolve::AwaitPrepared;
@@ -65,21 +65,10 @@ enum CacheStatus {
     Disabled,
 }
 
-const FUNCTION_CALL: IntrinsicDef = IntrinsicDef::call(
-    IntrinsicKey::new("Function", IntrinsicSlot::Prototype, "call"),
-    1,
-    VmCore::function_call,
-);
-const FUNCTION_APPLY: IntrinsicDef = IntrinsicDef::call(
-    IntrinsicKey::new("Function", IntrinsicSlot::Prototype, "apply"),
-    2,
-    VmCore::function_apply,
-);
-const FUNCTION_BIND: IntrinsicDef = IntrinsicDef::call(
-    IntrinsicKey::new("Function", IntrinsicSlot::Prototype, "bind"),
-    1,
-    VmCore::function_bind,
-);
+const FUNCTION_CALL: IntrinsicKey = IntrinsicKey::new("Function", IntrinsicSlot::Prototype, "call");
+const FUNCTION_APPLY: IntrinsicKey =
+    IntrinsicKey::new("Function", IntrinsicSlot::Prototype, "apply");
+const FUNCTION_BIND: IntrinsicKey = IntrinsicKey::new("Function", IntrinsicSlot::Prototype, "bind");
 pub(crate) const FUNCTION_HAS_INSTANCE: IntrinsicKey =
     IntrinsicKey::new("Function", IntrinsicSlot::PrototypeSymbol, "hasInstance");
 
@@ -89,46 +78,50 @@ const FUNCTION_PROTO: IntrinsicKey = IntrinsicKey::new("Function", IntrinsicSlot
 pub(crate) const THROW_TYPE_ERROR: IntrinsicKey =
     IntrinsicKey::new("ThrowTypeError", IntrinsicSlot::Prototype, "");
 pub(crate) const FUNCTION_METHODS: [IntrinsicKey; 4] = [
-    FUNCTION_CALL.key,
-    FUNCTION_APPLY.key,
-    FUNCTION_BIND.key,
-    IntrinsicKey::new("Function", IntrinsicSlot::Prototype, "toString"),
-];
-pub(crate) const FUNCTION_INTRINSICS: &[IntrinsicDef] = &[
-    IntrinsicDef::constructor(
-        FUNCTION_CTOR,
-        1,
-        |vm, _, roots, _, _| {
-            vm.throw_type_error(roots, "Dynamic function construction is disabled")
-        },
-        |vm, _, roots, _, _| {
-            vm.throw_type_error(roots, "Dynamic function construction is disabled")
-        },
-    )
-    .without_new_target_prototype(),
-    IntrinsicDef::call(FUNCTION_PROTO, 0, |_, _, _, _, _| {
-        Ok(Invocation::Value(Value::UNDEFINED))
-    }),
-    IntrinsicDef::call(THROW_TYPE_ERROR, 0, |vm, _, roots, _, _| {
-        vm.throw_type_error(roots, "Restricted function property")
-    }),
     FUNCTION_CALL,
     FUNCTION_APPLY,
     FUNCTION_BIND,
-    IntrinsicDef::call(
-        FUNCTION_HAS_INSTANCE,
-        1,
-        |vm, host, roots, args, receiver| {
-            vm.ordinary_has_instance(
-                host,
-                roots,
-                args.first().unwrap_or(&Value::UNDEFINED),
-                receiver,
-            )
-        },
-    ),
-    IntrinsicDef::call(FUNCTION_METHODS[3], 0, VmCore::function_to_string),
+    IntrinsicKey::new("Function", IntrinsicSlot::Prototype, "toString"),
 ];
+pub(crate) struct FunctionIntrinsics<P>(std::marker::PhantomData<P>);
+
+impl<P: PlatformServices> FunctionIntrinsics<P> {
+    pub(crate) const INTRINSICS: &[IntrinsicDef<P>] = &[
+        IntrinsicDef::constructor(
+            FUNCTION_CTOR,
+            1,
+            |vm, _, roots, _, _| {
+                vm.throw_type_error(roots, "Dynamic function construction is disabled")
+            },
+            |vm, _, roots, _, _| {
+                vm.throw_type_error(roots, "Dynamic function construction is disabled")
+            },
+        )
+        .without_new_target_prototype(),
+        IntrinsicDef::call(FUNCTION_PROTO, 0, |_, _, _, _, _| {
+            Ok(Invocation::Value(Value::UNDEFINED))
+        }),
+        IntrinsicDef::call(THROW_TYPE_ERROR, 0, |vm, _, roots, _, _| {
+            vm.throw_type_error(roots, "Restricted function property")
+        }),
+        IntrinsicDef::call(FUNCTION_CALL, 1, VmCore::function_call),
+        IntrinsicDef::call(FUNCTION_APPLY, 2, VmCore::function_apply),
+        IntrinsicDef::call(FUNCTION_BIND, 1, VmCore::function_bind),
+        IntrinsicDef::call(
+            FUNCTION_HAS_INSTANCE,
+            1,
+            |vm, host, roots, args, receiver| {
+                vm.ordinary_has_instance(
+                    host,
+                    roots,
+                    args.first().unwrap_or(&Value::UNDEFINED),
+                    receiver,
+                )
+            },
+        ),
+        IntrinsicDef::call(FUNCTION_METHODS[3], 0, VmCore::function_to_string),
+    ];
+}
 
 pub(crate) const FUNCTION_ROOTS: &[RootSpec] = &[
     RootSpec::new(
@@ -145,9 +138,9 @@ pub(crate) const FUNCTION_ROOTS: &[RootSpec] = &[
 ];
 
 impl VmCore {
-    fn function_call(
+    fn function_call<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: Vec<Value>,
         receiver: &Value,
@@ -160,9 +153,9 @@ impl VmCore {
         self.invoke(host, roots, receiver, Arguments::Values(rest), &this_arg)
     }
 
-    fn function_apply(
+    fn function_apply<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: Vec<Value>,
         receiver: &Value,
@@ -185,9 +178,9 @@ impl VmCore {
         self.invoke(host, roots, receiver, Arguments::Values(&args), &this_arg)
     }
 
-    fn function_bind(
+    fn function_bind<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: Vec<Value>,
         receiver: &Value,
@@ -236,9 +229,9 @@ impl VmCore {
         Ok(Invocation::Value(Value::object(id)))
     }
 
-    fn function_to_string(
+    fn function_to_string<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         _: Vec<Value>,
         receiver: &Value,
@@ -258,7 +251,11 @@ impl VmCore {
         Ok(Invocation::Value(Value::string(text)))
     }
 
-    fn initial_function_name(&self, host: &Host, id: ObjectId) -> Result<JsString, VmError> {
+    fn initial_function_name<P: PlatformServices>(
+        &self,
+        host: &Host<P>,
+        id: ObjectId,
+    ) -> Result<JsString, VmError> {
         Ok(match self.heap.get(id)? {
             Object::Function(function) => match &function.dynamic_name {
                 Some(name) => name.clone(),
@@ -269,7 +266,7 @@ impl VmCore {
             },
             Object::Bound(bound) => bound.initial_name.clone(),
             Object::Native(NativeObject::Intrinsic { intrinsic, .. }) => {
-                intrinsic.definition().key.initial_name()
+                intrinsic.definition::<crate::Platform>().key.initial_name()
             }
             Object::Native(NativeObject::Host { target, .. }) => {
                 crate::vm::host_function_metadata(host.bindings(), *target)
@@ -338,9 +335,9 @@ impl Hint {
 }
 
 impl VmCore {
-    pub(crate) fn execute_frame(
+    pub(crate) fn execute_frame<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         mut frame: Frame,
     ) -> Result<ExecOutcome, VmError> {
@@ -373,9 +370,9 @@ impl VmCore {
         }
     }
 
-    pub(crate) fn resume_continuation(
+    pub(crate) fn resume_continuation<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         continuation_id: crate::value::ContinuationId,
         settlement: &Settlement,
@@ -461,9 +458,9 @@ impl VmCore {
 
     /// Evaluates a comparison for a branch without materializing a boolean
     /// `Value` when both operands are numbers.
-    fn branch_compare(
+    fn branch_compare<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         op: BinaryOp,
         lhs: Value,
@@ -489,9 +486,9 @@ impl VmCore {
     }
 
     /// Evaluates a unary operation without committing a destination slot.
-    fn unary_value(
+    fn unary_value<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         op: UnaryOp,
         mut value: Value,
@@ -530,9 +527,9 @@ impl VmCore {
         }
     }
 
-    fn binary_value(
+    fn binary_value<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         op: BinaryOp,
         mut lhs: Value,
@@ -641,9 +638,9 @@ impl VmCore {
         })
     }
 
-    fn step(
+    fn step<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         frame: &mut Frame,
         instr: &Instr,
@@ -756,9 +753,9 @@ impl VmCore {
         clippy::too_many_arguments,
         reason = "Explicit active roots at a guest call boundary"
     )]
-    fn call_value(
+    fn call_value<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         frame: &mut Frame,
         dst: Slot,
@@ -802,9 +799,9 @@ impl VmCore {
         array.dense_values()
     }
 
-    pub(crate) fn get_iterator(
+    pub(crate) fn get_iterator<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         iterable: &Value,
     ) -> Result<Result<(Value, Value), Value>, VmError> {
@@ -825,9 +822,9 @@ impl VmCore {
         self.get_iterator_from_method(host, roots, iterable, &method)
     }
 
-    pub(crate) fn get_iterator_from_method(
+    pub(crate) fn get_iterator_from_method<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         iterable: &Value,
         method: &Value,
@@ -847,9 +844,9 @@ impl VmCore {
     }
 
     /// A failed step is not a consumer-side abrupt exit and does not close the iterator.
-    pub(crate) fn iterator_step(
+    pub(crate) fn iterator_step<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         iterator: &Value,
         next: &Value,
@@ -865,9 +862,9 @@ impl VmCore {
         }
     }
 
-    pub(crate) fn iterator_step_result(
+    pub(crate) fn iterator_step_result<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         iterator: &Value,
         next: &Value,
@@ -899,9 +896,9 @@ impl VmCore {
         array.append(value.clone())
     }
 
-    pub(crate) fn close_iterator(
+    pub(crate) fn close_iterator<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         iterator: &Value,
     ) -> Result<Invocation, VmError> {
@@ -924,9 +921,9 @@ impl VmCore {
         self.require_iterator_object(roots, invocation, "iterator return must return an object")
     }
 
-    pub(crate) fn string_value(
+    pub(crate) fn string_value<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Result<Invocation, VmError> {
@@ -936,9 +933,9 @@ impl VmCore {
         })
     }
 
-    pub(crate) fn coerce_string(
+    pub(crate) fn coerce_string<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Result<Result<JsString, Value>, VmError> {
@@ -954,9 +951,9 @@ impl VmCore {
 
     /// `Number(value)` accepts BigInt by an explicit precision-losing conversion,
     /// unlike arithmetic and `Number.prototype` methods.
-    pub(crate) fn coerce_number_allow_bigint(
+    pub(crate) fn coerce_number_allow_bigint<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Result<Result<f64, Value>, VmError> {
@@ -973,9 +970,9 @@ impl VmCore {
         Ok(Ok(ops::to_number(&value)?))
     }
 
-    pub(crate) fn coerce_number(
+    pub(crate) fn coerce_number<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Result<Result<f64, Value>, VmError> {
@@ -992,9 +989,9 @@ impl VmCore {
         Ok(Ok(ops::to_number(&value)?))
     }
 
-    pub(crate) fn coerce_property_key(
+    pub(crate) fn coerce_property_key<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Result<Result<PropertyKey, Value>, VmError> {
@@ -1008,9 +1005,9 @@ impl VmCore {
         }))
     }
 
-    pub(crate) fn coerce_primitive<'a>(
+    pub(crate) fn coerce_primitive<'a, P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         value: &'a Value,
         hint: Hint,
@@ -1026,9 +1023,9 @@ impl VmCore {
         )
     }
 
-    fn primitive_from_object(
+    fn primitive_from_object<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         value: &Value,
         hint: Hint,
@@ -1062,9 +1059,9 @@ impl VmCore {
         self.ordinary_to_primitive(host, roots, value, hint)
     }
 
-    pub(crate) fn ordinary_to_primitive(
+    pub(crate) fn ordinary_to_primitive<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         value: &Value,
         hint: Hint,
@@ -1107,9 +1104,9 @@ impl VmCore {
         }
     }
 
-    pub(crate) fn read_member(
+    pub(crate) fn read_member<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         object: &Value,
         key: &Value,
@@ -1145,9 +1142,9 @@ impl VmCore {
         self.read_property(host, roots, object, key.borrowed())
     }
 
-    fn read_destructured_member(
+    fn read_destructured_member<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         object: &Value,
         key: PropertyKeyRef<'_>,
@@ -1158,9 +1155,9 @@ impl VmCore {
         self.read_property(host, roots, object, key)
     }
 
-    pub(crate) fn read_property(
+    pub(crate) fn read_property<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         object: &Value,
         key: PropertyKeyRef<'_>,
@@ -1180,9 +1177,9 @@ impl VmCore {
         self.read_property_with_receiver(host, roots, id, object, key)
     }
 
-    pub(crate) fn read_property_with_receiver(
+    pub(crate) fn read_property_with_receiver<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
         receiver: &Value,
@@ -1241,9 +1238,9 @@ impl VmCore {
 
     /// Get on a ToObject result. Keep the same wrapper across accesses, but
     /// defer creating it until an accessor or proxy can observe the receiver.
-    pub(crate) fn read_to_object_property(
+    pub(crate) fn read_to_object_property<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         value: &Value,
         boxed: &mut Option<ObjectId>,
@@ -1270,9 +1267,9 @@ impl VmCore {
         })
     }
 
-    fn read_property_from_chain<'a>(
+    fn read_property_from_chain<'a, P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
         key: PropertyKeyRef<'_>,
@@ -1330,9 +1327,9 @@ impl VmCore {
         Ok(Invocation::Value(Value::UNDEFINED))
     }
 
-    pub(crate) fn read_array_index(
+    pub(crate) fn read_array_index<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         index: usize,
@@ -1353,9 +1350,9 @@ impl VmCore {
         }
     }
 
-    fn read_property_value(
+    fn read_property_value<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         property: Property,
@@ -1369,9 +1366,9 @@ impl VmCore {
         }
     }
 
-    fn instance_of(
+    fn instance_of<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         value: &Value,
         constructor: &Value,
@@ -1379,9 +1376,9 @@ impl VmCore {
         self.has_instance(host, roots, value, constructor, false)
     }
 
-    pub(crate) fn ordinary_has_instance(
+    pub(crate) fn ordinary_has_instance<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         value: &Value,
         constructor: &Value,
@@ -1389,9 +1386,9 @@ impl VmCore {
         self.has_instance(host, roots, value, constructor, true)
     }
 
-    fn has_instance(
+    fn has_instance<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         value: &Value,
         constructor: &Value,
@@ -1509,9 +1506,9 @@ impl VmCore {
         Ok(Invocation::Value(Value::boolean(false)))
     }
 
-    fn has_property(
+    fn has_property<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         object: &Value,
         key: &Value,
@@ -1527,9 +1524,9 @@ impl VmCore {
         self.has_property_key(host, roots, id, key.borrowed())
     }
 
-    pub(crate) fn has_property_key(
+    pub(crate) fn has_property_key<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
         key: PropertyKeyRef<'_>,
@@ -1556,9 +1553,9 @@ impl VmCore {
         Ok(Invocation::Value(Value::boolean(false)))
     }
 
-    pub(crate) fn delete_property(
+    pub(crate) fn delete_property<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         target: &Value,
         key: &Value,
@@ -1599,9 +1596,9 @@ impl VmCore {
         Ok(Invocation::Value(Value::boolean(deleted)))
     }
 
-    fn write_member(
+    fn write_member<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         object: &Value,
         key: &Value,
@@ -1725,9 +1722,9 @@ impl VmCore {
         clippy::too_many_arguments,
         reason = "Explicit active roots at a guest call boundary"
     )]
-    pub(crate) fn set_property(
+    pub(crate) fn set_property<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
         receiver: &Value,
@@ -1893,9 +1890,9 @@ impl VmCore {
         Ok(success)
     }
 
-    fn copy_data_properties(
+    fn copy_data_properties<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
         source: &Value,
@@ -2050,9 +2047,9 @@ impl VmCore {
     }
 
     /// Initialize each own element in source order, stopping at the first throw.
-    pub(crate) fn initialize_class_elements(
+    pub(crate) fn initialize_class_elements<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         class: ObjectId,
         receiver: ObjectId,
@@ -2241,9 +2238,9 @@ impl VmCore {
         Ok(Step::Next)
     }
 
-    fn suspend(
+    fn suspend<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         frame: &Frame,
         input: Slot,
@@ -2338,9 +2335,9 @@ impl VmCore {
     ///
     /// The instance prototype is the function's `.prototype` when that is an
     /// object and the shared generator prototype otherwise.
-    fn start_generator(
+    fn start_generator<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         frame: &mut Frame,
     ) -> Result<Step, VmError> {
@@ -2481,9 +2478,9 @@ impl VmCore {
     ///
     /// A receiver that is not an async generator still returns a Promise: the
     /// method rejects with a `TypeError` instead of throwing synchronously.
-    pub(crate) fn resume_async_generator(
+    pub(crate) fn resume_async_generator<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         completion: GeneratorCompletion,
@@ -2525,9 +2522,9 @@ impl VmCore {
     ///
     /// An async generator never runs the body here: the completion becomes a
     /// queued request, so the body may already be executing or awaiting.
-    pub(crate) fn resume_generator(
+    pub(crate) fn resume_generator<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         completion: GeneratorCompletion,
@@ -2668,9 +2665,9 @@ impl VmCore {
     /// Queue one async generator request and drive the generator as far as the
     /// queue allows. The request Promise is always pending until a step settles
     /// it, so a caller inside the body only appends.
-    fn enqueue_async_request(
+    fn enqueue_async_request<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         completion: GeneratorCompletion,
@@ -2697,9 +2694,9 @@ impl VmCore {
     /// Drain the async generator queue one step at a time. Each step runs the
     /// body at most once or settles the head request, never both, so the queue
     /// is not emptied by recursion.
-    fn drive_async_generator(
+    fn drive_async_generator<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
     ) -> Result<(), VmError> {
@@ -2707,9 +2704,9 @@ impl VmCore {
         Ok(())
     }
 
-    fn async_generator_step(
+    fn async_generator_step<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
     ) -> Result<bool, VmError> {
@@ -2757,9 +2754,9 @@ impl VmCore {
     ///
     /// `next` reports `done`, `throw` rejects, and `return` assimilates its
     /// argument through a persisted Promise reaction before reporting `done`.
-    fn settle_finished_request(
+    fn settle_finished_request<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         head: &AsyncRequest,
@@ -2811,9 +2808,9 @@ impl VmCore {
     }
 
     /// Settle the request whose return argument finished assimilating.
-    pub(crate) fn finish_closing_request(
+    pub(crate) fn finish_closing_request<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         generator: ObjectId,
         request: ObjectId,

@@ -14,7 +14,7 @@ use crate::builtin::{
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, Object, PlainObject};
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{ObjectId, Value, ValueRef};
@@ -62,19 +62,21 @@ macro_rules! definitions {
     ($($prop:literal => $getter:expr),+; $($method:literal => $mode:ident),+) => {
         const GETTERS: &[&str] = &[$($prop),+];
         const METHODS: &[&str] = &["clone", $($method),+];
-        const INTRINSICS: &[IntrinsicDef] = &[
-            IntrinsicDef::constructor(CONSTRUCTOR, 0, |vm, _, roots, _, _| vm.throw_type_error(roots, "Response requires new"),
-                |vm, host, roots, args, prototype| construct(vm, host, roots, &args, prototype)),
-            IntrinsicDef::call(IntrinsicKey::new(NAME, Slot::Static, "error"), 0, |vm, _, _, _, _| error(vm)),
-            IntrinsicDef::call(IntrinsicKey::new(NAME, Slot::Static, "redirect"), 1, |vm, host, roots, args, _| redirect(vm, host, roots, &args)),
-            IntrinsicDef::call(IntrinsicKey::new(NAME, Slot::Static, "json"), 1, |vm, host, roots, args, _| json(vm, host, roots, &args)),
-            IntrinsicDef::call(IntrinsicKey::new(NAME, Slot::Prototype, "clone"), 0,
-                |vm, host, roots, _, this| clone_response(vm, host, roots, this)),
-            $(IntrinsicDef::call(IntrinsicKey::new(NAME, Slot::PrototypeGetter, $prop), 0,
-                |vm, _, roots, _, this| read(vm, roots, this, $getter))),+
-            ,$(IntrinsicDef::call(IntrinsicKey::new(NAME, Slot::Prototype, $method), 0,
-                |vm, host, roots, _, this| consume(vm, host, roots, this, BodyMode::$mode))),+
-        ];
+        impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+            const INTRINSICS: &[IntrinsicDef<P>] = &[
+                IntrinsicDef::constructor(CONSTRUCTOR, 0, |vm, _, roots, _, _| vm.throw_type_error(roots, "Response requires new"),
+                    |vm, host, roots, args, prototype| construct(vm, host, roots, &args, prototype)),
+                IntrinsicDef::call(IntrinsicKey::new(NAME, Slot::Static, "error"), 0, |vm, _, _, _, _| error(vm)),
+                IntrinsicDef::call(IntrinsicKey::new(NAME, Slot::Static, "redirect"), 1, |vm, host, roots, args, _| redirect(vm, host, roots, &args)),
+                IntrinsicDef::call(IntrinsicKey::new(NAME, Slot::Static, "json"), 1, |vm, host, roots, args, _| json(vm, host, roots, &args)),
+                IntrinsicDef::call(IntrinsicKey::new(NAME, Slot::Prototype, "clone"), 0,
+                    |vm, host, roots, _, this| clone_response(vm, host, roots, this)),
+                $(IntrinsicDef::call(IntrinsicKey::new(NAME, Slot::PrototypeGetter, $prop), 0,
+                    |vm, _, roots, _, this| read(vm, roots, this, $getter))),+
+                ,$(IntrinsicDef::call(IntrinsicKey::new(NAME, Slot::Prototype, $method), 0,
+                    |vm, host, roots, _, this| consume(vm, host, roots, this, BodyMode::$mode))),+
+            ];
+        }
     };
 }
 
@@ -90,7 +92,10 @@ definitions! {
     "arrayBuffer" => ArrayBuffer, "blob" => Blob, "bytes" => Bytes, "text" => Text, "json" => Json, "formData" => FormData
 }
 
-pub(crate) const RESPONSE_OWNER: Owner = Owner::new(ROOT, ROOTS, &[INTRINSICS], Some(install));
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const RESPONSE_OWNER: Owner<P> =
+        Owner::new(ROOT, ROOTS, &[Self::INTRINSICS], Some(install));
+}
 
 fn install(vm: &mut VmCore, _: &Value) {
     install_interface(vm, NAME, ROOT, PROTOTYPE, GETTERS, METHODS);
@@ -127,9 +132,9 @@ fn read(
     Ok(Invocation::Value(getter(data, vm)))
 }
 
-fn consume(
+fn consume<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     this: &Value,
     mode: BodyMode,
@@ -182,9 +187,9 @@ impl VmCore {
     }
 }
 
-fn status(
+fn status<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     value: &Value,
     default: u16,
@@ -201,9 +206,9 @@ fn status(
     }))
 }
 
-fn init(
+fn init<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     value: &Value,
 ) -> body::Completion<(u16, String, Value)> {
@@ -242,9 +247,9 @@ fn init(
     Ok(Ok((status, text, headers)))
 }
 
-fn initialize(
+fn initialize<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     proto: Option<ObjectId>,
     options: (u16, String, Value),
@@ -288,9 +293,9 @@ fn initialize(
     )))
 }
 
-fn construct(
+fn construct<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: &[Value],
     prototype: Option<ObjectId>,
@@ -329,9 +334,9 @@ impl VmCore {
     }
 }
 
-fn redirect(
+fn redirect<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: &[Value],
 ) -> Result<Invocation, VmError> {
@@ -375,9 +380,9 @@ fn redirect(
     )))
 }
 
-fn json(
+fn json<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: &[Value],
 ) -> Result<Invocation, VmError> {
@@ -411,9 +416,9 @@ fn json(
     )
 }
 
-fn clone_response(
+fn clone_response<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     this: &Value,
 ) -> Result<Invocation, VmError> {
@@ -434,3 +439,5 @@ fn clone_response(
         vm.alloc_response(None, copy),
     )))
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

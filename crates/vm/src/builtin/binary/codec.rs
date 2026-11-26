@@ -8,7 +8,7 @@ use super::{Completion, arg, element};
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{ElementKind, Object, TO_STRING_TAG_SYMBOL};
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::runtime::{Arguments, Invocation};
 use crate::value::{JsString, ObjectId, PropertyKeyRef, Value, ValueRef};
 use crate::vm::VmCore;
@@ -318,9 +318,9 @@ impl VmCore {
         }
     }
 
-    fn string_option(
+    fn string_option<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         options: Option<ObjectId>,
         key: &str,
@@ -351,9 +351,9 @@ impl VmCore {
         }
     }
 
-    pub(super) fn boolean_option(
+    pub(super) fn boolean_option<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         options: Option<ObjectId>,
         key: &str,
@@ -397,9 +397,9 @@ impl VmCore {
 
     /// Allocate a fresh `%Uint8Array%` and fill it with decoded bytes. The
     /// codec always uses the intrinsic constructor, never the receiver's.
-    pub(super) fn uint8_from_bytes(
+    pub(super) fn uint8_from_bytes<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         bytes: &[u8],
     ) -> Completion<Value> {
@@ -475,9 +475,9 @@ impl VmCore {
         Ok(Ok(bytes[start..start + length].to_vec()))
     }
 
-    pub(super) fn uint8_from_base64(
+    pub(super) fn uint8_from_base64<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -533,9 +533,9 @@ impl VmCore {
         }
     }
 
-    pub(super) fn uint8_from_hex(
+    pub(super) fn uint8_from_hex<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -561,9 +561,9 @@ impl VmCore {
         }
     }
 
-    pub(super) fn uint8_set_from_base64(
+    pub(super) fn uint8_set_from_base64<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         args: &[Value],
@@ -666,9 +666,9 @@ impl VmCore {
         Ok(Invocation::Value(Value::object(result)))
     }
 
-    pub(super) fn uint8_to_base64(
+    pub(super) fn uint8_to_base64<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         args: &[Value],

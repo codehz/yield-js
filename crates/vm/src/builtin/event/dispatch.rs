@@ -2,15 +2,15 @@ use super::event_receiver;
 use crate::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{AbortStep, EventListener, EventPayload, EventState, EventTargetState, Object};
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::runtime::{Arguments, HostSlot, Invocation};
 use crate::value::{JsString, ObjectId, PropertyKeyRef, Value, ValueRef};
 use crate::vm::VmCore;
 use std::collections::BTreeSet;
 
-pub(super) fn add_listener(
+pub(super) fn add_listener<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -18,9 +18,9 @@ pub(super) fn add_listener(
     change_listener(vm, host, roots, args, receiver, true)
 }
 
-pub(super) fn remove_listener(
+pub(super) fn remove_listener<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -28,9 +28,9 @@ pub(super) fn remove_listener(
     change_listener(vm, host, roots, args, receiver, false)
 }
 
-fn change_listener(
+fn change_listener<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -147,9 +147,9 @@ fn change_listener(
     Ok(Invocation::Value(Value::UNDEFINED))
 }
 
-pub(super) fn dispatch_untrusted(
+pub(super) fn dispatch_untrusted<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -157,9 +157,9 @@ pub(super) fn dispatch_untrusted(
     dispatch_call(vm, host, roots, &args, receiver, false)
 }
 
-pub(super) fn dispatch_trusted(
+pub(super) fn dispatch_trusted<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -167,9 +167,9 @@ pub(super) fn dispatch_trusted(
     dispatch_call(vm, host, roots, &args, receiver, true)
 }
 
-fn dispatch_call(
+fn dispatch_call<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: &[Value],
     receiver: &Value,
@@ -201,9 +201,9 @@ struct ListenerPass<'a> {
 
 impl VmCore {
     // Read only the VM-managed parent slot; never consult JS properties.
-    fn dispatch_path(
+    fn dispatch_path<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
     ) -> Result<Result<Vec<ObjectId>, Value>, VmError> {
@@ -284,9 +284,9 @@ impl VmCore {
     }
 
     /// Dispatch by internal brand, without consulting public methods on the target.
-    pub(crate) fn dispatch_event(
+    pub(crate) fn dispatch_event<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
         event: ObjectId,
@@ -363,9 +363,9 @@ impl VmCore {
         Ok(event)
     }
 
-    fn invoke_event_listeners(
+    fn invoke_event_listeners<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         event: ObjectId,
         current: ObjectId,
@@ -457,9 +457,9 @@ impl VmCore {
         Ok(())
     }
 
-    fn invoke_event_listener(
+    fn invoke_event_listener<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         callback: &Value,
         current_target: &Value,

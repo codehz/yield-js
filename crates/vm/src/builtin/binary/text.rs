@@ -22,7 +22,7 @@ use crate::heap::{
     Attributes, DescriptorUpdate, Object, PlainObject, TO_STRING_TAG_SYMBOL, TextDecoderConfig,
     TextDecoderObject, TextEncoding, ViewRange,
 };
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{JsString, ObjectId, PropertyKey, Value, ValueRef};
@@ -56,89 +56,97 @@ const UTF8_LABELS: &[&str] = &[
     "x-unicode20utf8",
 ];
 
-const ENCODER_INTRINSICS: &[IntrinsicDef] = &[
-    IntrinsicDef::constructor(
-        ENCODER,
-        0,
-        |vm, _, roots, _, _| vm.throw_type_error(roots, "TextEncoder constructor requires new"),
-        construct_encoder,
-    ),
-    IntrinsicDef::call(ENCODING, 0, |vm, _, roots, _, receiver| {
-        match vm.require_encoder(roots, receiver)? {
-            Ok(_) => Ok(Invocation::Value(Value::string("utf-8".into()))),
-            Err(error) => Ok(Invocation::Thrown(error)),
-        }
-    }),
-    IntrinsicDef::call(ENCODE, 0, |vm, host, roots, args, receiver| {
-        vm.text_encode(host, roots, receiver, &args)
-    }),
-    IntrinsicDef::call(ENCODE_INTO, 2, |vm, host, roots, args, receiver| {
-        vm.text_encode_into(host, roots, receiver, &args)
-    }),
-];
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    const ENCODER_INTRINSICS: &[IntrinsicDef<P>] = &[
+        IntrinsicDef::constructor(
+            ENCODER,
+            0,
+            |vm, _, roots, _, _| vm.throw_type_error(roots, "TextEncoder constructor requires new"),
+            construct_encoder,
+        ),
+        IntrinsicDef::call(ENCODING, 0, |vm, _, roots, _, receiver| {
+            match vm.require_encoder(roots, receiver)? {
+                Ok(_) => Ok(Invocation::Value(Value::string("utf-8".into()))),
+                Err(error) => Ok(Invocation::Thrown(error)),
+            }
+        }),
+        IntrinsicDef::call(ENCODE, 0, |vm, host, roots, args, receiver| {
+            vm.text_encode(host, roots, receiver, &args)
+        }),
+        IntrinsicDef::call(ENCODE_INTO, 2, |vm, host, roots, args, receiver| {
+            vm.text_encode_into(host, roots, receiver, &args)
+        }),
+    ];
+}
 
-const DECODER_INTRINSICS: &[IntrinsicDef] = &[
-    IntrinsicDef::constructor(
-        DECODER,
-        0,
-        |vm, _, roots, _, _| vm.throw_type_error(roots, "TextDecoder constructor requires new"),
-        construct_decoder,
-    ),
-    IntrinsicDef::call(DECODER_ENCODING, 0, |vm, _, roots, _, receiver| {
-        match vm.text_decoder_state(receiver)? {
-            Some(state) => Ok(Invocation::Value(encoding_value(state.encoding))),
-            None => vm.throw_type_error(
-                roots,
-                "TextDecoder method called on an incompatible receiver",
-            ),
-        }
-    }),
-    IntrinsicDef::call(FATAL, 0, |vm, _, roots, _, receiver| {
-        match vm.text_decoder_state(receiver)? {
-            Some(state) => Ok(Invocation::Value(Value::boolean(state.fatal))),
-            None => vm.throw_type_error(
-                roots,
-                "TextDecoder method called on an incompatible receiver",
-            ),
-        }
-    }),
-    IntrinsicDef::call(IGNORE_BOM, 0, |vm, _, roots, _, receiver| {
-        match vm.text_decoder_state(receiver)? {
-            Some(state) => Ok(Invocation::Value(Value::boolean(state.ignore_bom))),
-            None => vm.throw_type_error(
-                roots,
-                "TextDecoder method called on an incompatible receiver",
-            ),
-        }
-    }),
-    IntrinsicDef::call(DECODE, 0, |vm, host, roots, args, receiver| {
-        vm.text_decode(host, roots, receiver, &args)
-    }),
-];
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    const DECODER_INTRINSICS: &[IntrinsicDef<P>] = &[
+        IntrinsicDef::constructor(
+            DECODER,
+            0,
+            |vm, _, roots, _, _| vm.throw_type_error(roots, "TextDecoder constructor requires new"),
+            construct_decoder,
+        ),
+        IntrinsicDef::call(DECODER_ENCODING, 0, |vm, _, roots, _, receiver| {
+            match vm.text_decoder_state(receiver)? {
+                Some(state) => Ok(Invocation::Value(encoding_value(state.encoding))),
+                None => vm.throw_type_error(
+                    roots,
+                    "TextDecoder method called on an incompatible receiver",
+                ),
+            }
+        }),
+        IntrinsicDef::call(FATAL, 0, |vm, _, roots, _, receiver| {
+            match vm.text_decoder_state(receiver)? {
+                Some(state) => Ok(Invocation::Value(Value::boolean(state.fatal))),
+                None => vm.throw_type_error(
+                    roots,
+                    "TextDecoder method called on an incompatible receiver",
+                ),
+            }
+        }),
+        IntrinsicDef::call(IGNORE_BOM, 0, |vm, _, roots, _, receiver| {
+            match vm.text_decoder_state(receiver)? {
+                Some(state) => Ok(Invocation::Value(Value::boolean(state.ignore_bom))),
+                None => vm.throw_type_error(
+                    roots,
+                    "TextDecoder method called on an incompatible receiver",
+                ),
+            }
+        }),
+        IntrinsicDef::call(DECODE, 0, |vm, host, roots, args, receiver| {
+            vm.text_decode(host, roots, receiver, &args)
+        }),
+    ];
+}
 
-pub(crate) const ENCODER_OWNER: Owner = Owner::new(
-    ENCODER_ROOT,
-    &[
-        RootSpec::new(ENCODER_ROOT, RootKind::Native(ENCODER), FUNCTION_PARENT)
-            .fixed(ENCODER_PROTOTYPE)
-            .backlink(Some(Attributes::METHOD)),
-        RootSpec::new(ENCODER_PROTOTYPE, RootKind::Plain, OBJECT_PARENT),
-    ],
-    &[ENCODER_INTRINSICS],
-    Some(install_encoder),
-);
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const ENCODER_OWNER: Owner<P> = Owner::new(
+        ENCODER_ROOT,
+        &[
+            RootSpec::new(ENCODER_ROOT, RootKind::Native(ENCODER), FUNCTION_PARENT)
+                .fixed(ENCODER_PROTOTYPE)
+                .backlink(Some(Attributes::METHOD)),
+            RootSpec::new(ENCODER_PROTOTYPE, RootKind::Plain, OBJECT_PARENT),
+        ],
+        &[Self::ENCODER_INTRINSICS],
+        Some(install_encoder),
+    );
+}
 
-pub(crate) const DECODER_OWNER: Owner = Owner::new(
-    DECODER_ROOT,
-    &[
-        RootSpec::new(DECODER_ROOT, RootKind::Native(DECODER), FUNCTION_PARENT)
-            .fixed(DECODER_PROTOTYPE)
-            .backlink(Some(Attributes::METHOD)),
-        RootSpec::new(DECODER_PROTOTYPE, RootKind::Plain, OBJECT_PARENT),
-    ],
-    &[DECODER_INTRINSICS],
-    Some(install_decoder),
-);
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const DECODER_OWNER: Owner<P> = Owner::new(
+        DECODER_ROOT,
+        &[
+            RootSpec::new(DECODER_ROOT, RootKind::Native(DECODER), FUNCTION_PARENT)
+                .fixed(DECODER_PROTOTYPE)
+                .backlink(Some(Attributes::METHOD)),
+            RootSpec::new(DECODER_PROTOTYPE, RootKind::Plain, OBJECT_PARENT),
+        ],
+        &[Self::DECODER_INTRINSICS],
+        Some(install_decoder),
+    );
+}
 
 fn install_encoder(vm: &mut VmCore, _: &Value) {
     let constructor = vm.builtins.get(ENCODER_ROOT);
@@ -208,9 +216,9 @@ fn accessor(vm: &mut VmCore, target: ObjectId, key: &str, intrinsic: IntrinsicKe
     );
 }
 
-fn construct_encoder(
+fn construct_encoder<P: PlatformServices>(
     vm: &mut VmCore,
-    _: &Host,
+    _: &Host<P>,
     _: &ActiveRoots<'_>,
     _: Vec<Value>,
     prototype: Option<ObjectId>,
@@ -222,9 +230,9 @@ fn construct_encoder(
     Ok(Invocation::Value(Value::object(object)))
 }
 
-fn construct_decoder(
+fn construct_decoder<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     prototype: Option<ObjectId>,
@@ -249,9 +257,9 @@ fn construct_decoder(
     Ok(Invocation::Value(Value::object(object)))
 }
 
-pub(in crate::builtin) fn decoder_config(
+pub(in crate::builtin) fn decoder_config<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: &[Value],
 ) -> Completion<TextDecoderConfig> {
@@ -301,9 +309,9 @@ fn canonical_label(label: &str) -> Option<TextEncoding> {
 
 /// The `TextDecoderOptions` dictionary: undefined and null are empty, any
 /// other non-object is a TypeError. Members are read in lexicographic order.
-fn decoder_options(
+fn decoder_options<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     options: &Value,
 ) -> Completion<(bool, bool)> {
@@ -324,9 +332,9 @@ fn decoder_options(
 }
 
 /// `TextDecodeOptions`: undefined and null are empty, other non-objects throw.
-fn stream_option(
+fn stream_option<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     options: &Value,
 ) -> Completion<bool> {
@@ -464,9 +472,9 @@ impl VmCore {
         Ok(Ok(id))
     }
 
-    pub(super) fn text_encode(
+    pub(super) fn text_encode<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         args: &[Value],
@@ -491,9 +499,9 @@ impl VmCore {
         }
     }
 
-    pub(super) fn text_encode_into(
+    pub(super) fn text_encode_into<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         args: &[Value],
@@ -550,9 +558,9 @@ impl VmCore {
         self.codec_result(roots, read, written, None)
     }
 
-    pub(super) fn text_decode(
+    pub(super) fn text_decode<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         args: &[Value],
@@ -608,3 +616,5 @@ impl VmCore {
         }
     }
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

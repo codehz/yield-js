@@ -8,7 +8,7 @@ use crate::heap::{
     Attributes, CollectionIteration, CollectionKind, ITERATOR_SYMBOL, Object, PlainObject,
     TO_STRING_TAG_SYMBOL,
 };
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::{Arguments, Invocation};
 use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
@@ -70,60 +70,74 @@ const WEAK_MAP: IntrinsicKey = IntrinsicKey::new("WeakMap", Slot::Global, "");
 const WEAK_SET: IntrinsicKey = IntrinsicKey::new("WeakSet", Slot::Global, "");
 const INVALID_WEAK_KEY: &str = "weak collection key must be an object or non-registered symbol";
 
-pub(crate) const MAP_OWNER: Owner = Owner::new(
-    map_members::ROOT,
-    MAP_ROOTS,
-    &[MAP_INTRINSICS, map_members::INTRINSICS],
-    Some(|vm, identity| {
-        vm.install_collection(
-            CollectionKind::Map,
-            vm.builtins.get("map"),
-            vm.builtins.get("map.prototype"),
-            vm.builtins.get("mapIterator.prototype"),
-            identity,
-        );
-    }),
-);
-pub(crate) const SET_OWNER: Owner = Owner::new(
-    set_entries::ROOT,
-    SET_ROOTS,
-    &[
-        SET_INTRINSICS,
-        set_members::INTRINSICS,
-        set_entries::INTRINSICS,
-    ],
-    Some(|vm, identity| {
-        vm.install_collection(
-            CollectionKind::Set,
-            vm.builtins.get(set_members::ROOT),
-            vm.builtins.get("set.prototype"),
-            vm.builtins.get("setIterator.prototype"),
-            identity,
-        );
-    }),
-);
-pub(crate) const WEAK_MAP_OWNER: Owner = Owner::new(
-    weak_map_members::ROOT,
-    WEAK_MAP_ROOTS,
-    &[WEAK_MAP_INTRINSICS, weak_map_members::INTRINSICS],
-    Some(|vm, _| {
-        let constructor = vm.builtins.get("weakmap");
-        let prototype = vm.builtins.get("weakmap.prototype");
-        link_constructor(vm, constructor, prototype);
-        weak_map_members::install_members(vm, constructor, prototype);
-    }),
-);
-pub(crate) const WEAK_SET_OWNER: Owner = Owner::new(
-    weak_set_members::ROOT,
-    WEAK_SET_ROOTS,
-    &[WEAK_SET_INTRINSICS, weak_set_members::INTRINSICS],
-    Some(|vm, _| {
-        let constructor = vm.builtins.get("weakset");
-        let prototype = vm.builtins.get("weakset.prototype");
-        link_constructor(vm, constructor, prototype);
-        weak_set_members::install_members(vm, constructor, prototype);
-    }),
-);
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const MAP_OWNER: Owner<P> = Owner::new(
+        map_members::ROOT,
+        MAP_ROOTS,
+        &[Self::MAP_INTRINSICS, map_members::Globals::<P>::INTRINSICS],
+        Some(|vm, identity| {
+            vm.install_collection(
+                CollectionKind::Map,
+                vm.builtins.get("map"),
+                vm.builtins.get("map.prototype"),
+                vm.builtins.get("mapIterator.prototype"),
+                identity,
+            );
+        }),
+    );
+}
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const SET_OWNER: Owner<P> = Owner::new(
+        set_entries::ROOT,
+        SET_ROOTS,
+        &[
+            Self::SET_INTRINSICS,
+            set_members::Globals::<P>::INTRINSICS,
+            set_entries::Globals::<P>::INTRINSICS,
+        ],
+        Some(|vm, identity| {
+            vm.install_collection(
+                CollectionKind::Set,
+                vm.builtins.get(set_members::ROOT),
+                vm.builtins.get("set.prototype"),
+                vm.builtins.get("setIterator.prototype"),
+                identity,
+            );
+        }),
+    );
+}
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const WEAK_MAP_OWNER: Owner<P> = Owner::new(
+        weak_map_members::ROOT,
+        WEAK_MAP_ROOTS,
+        &[
+            Self::WEAK_MAP_INTRINSICS,
+            weak_map_members::Globals::<P>::INTRINSICS,
+        ],
+        Some(|vm, _| {
+            let constructor = vm.builtins.get("weakmap");
+            let prototype = vm.builtins.get("weakmap.prototype");
+            link_constructor(vm, constructor, prototype);
+            weak_map_members::install_members(vm, constructor, prototype);
+        }),
+    );
+}
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const WEAK_SET_OWNER: Owner<P> = Owner::new(
+        weak_set_members::ROOT,
+        WEAK_SET_ROOTS,
+        &[
+            Self::WEAK_SET_INTRINSICS,
+            weak_set_members::Globals::<P>::INTRINSICS,
+        ],
+        Some(|vm, _| {
+            let constructor = vm.builtins.get("weakset");
+            let prototype = vm.builtins.get("weakset.prototype");
+            link_constructor(vm, constructor, prototype);
+            weak_set_members::install_members(vm, constructor, prototype);
+        }),
+    );
+}
 
 pub(crate) const MAP_ROOTS: &[RootSpec] = &[
     RootSpec::new("map", RootKind::Native(MAP), Some("function.prototype")).fixed("map.prototype"),
@@ -285,33 +299,37 @@ mod set_entries {
 const MAP_ITERATOR_NEXT: IntrinsicKey = IntrinsicKey::new("MapIterator", Slot::Prototype, "next");
 const SET_ITERATOR_NEXT: IntrinsicKey = IntrinsicKey::new("SetIterator", Slot::Prototype, "next");
 
-const MAP_INTRINSICS: &[IntrinsicDef] = &[
-    IntrinsicDef::constructor(
-        MAP,
-        1,
-        |vm, _, roots, _, _| vm.throw_type_error(roots, "Map and Set require new"),
-        |vm, host, roots, args, prototype| {
-            vm.construct_collection(host, roots, CollectionKind::Map, &args, prototype)
-        },
-    ),
-    IntrinsicDef::call(MAP_ITERATOR_NEXT, 0, |vm, _, roots, _, receiver| {
-        vm.collection_next(roots, CollectionKind::Map, receiver)
-    }),
-];
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    const MAP_INTRINSICS: &[IntrinsicDef<P>] = &[
+        IntrinsicDef::constructor(
+            MAP,
+            1,
+            |vm, _, roots, _, _| vm.throw_type_error(roots, "Map and Set require new"),
+            |vm, host, roots, args, prototype| {
+                vm.construct_collection(host, roots, CollectionKind::Map, &args, prototype)
+            },
+        ),
+        IntrinsicDef::call(MAP_ITERATOR_NEXT, 0, |vm, _, roots, _, receiver| {
+            vm.collection_next(roots, CollectionKind::Map, receiver)
+        }),
+    ];
+}
 
-const SET_INTRINSICS: &[IntrinsicDef] = &[
-    IntrinsicDef::constructor(
-        SET,
-        1,
-        |vm, _, roots, _, _| vm.throw_type_error(roots, "Map and Set require new"),
-        |vm, host, roots, args, prototype| {
-            vm.construct_collection(host, roots, CollectionKind::Set, &args, prototype)
-        },
-    ),
-    IntrinsicDef::call(SET_ITERATOR_NEXT, 0, |vm, _, roots, _, receiver| {
-        vm.collection_next(roots, CollectionKind::Set, receiver)
-    }),
-];
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    const SET_INTRINSICS: &[IntrinsicDef<P>] = &[
+        IntrinsicDef::constructor(
+            SET,
+            1,
+            |vm, _, roots, _, _| vm.throw_type_error(roots, "Map and Set require new"),
+            |vm, host, roots, args, prototype| {
+                vm.construct_collection(host, roots, CollectionKind::Set, &args, prototype)
+            },
+        ),
+        IntrinsicDef::call(SET_ITERATOR_NEXT, 0, |vm, _, roots, _, receiver| {
+            vm.collection_next(roots, CollectionKind::Set, receiver)
+        }),
+    ];
+}
 
 #[yield_binding_macros::builtin_global(name = "WeakMap", root = "weakmap", kind = "constructor")]
 mod weak_map_members {
@@ -327,12 +345,14 @@ mod weak_map_members {
     }
 }
 
-const WEAK_MAP_INTRINSICS: &[IntrinsicDef] = &[IntrinsicDef::constructor(
-    WEAK_MAP,
-    1,
-    |vm, _, roots, _, _| vm.throw_type_error(roots, "WeakMap requires new"),
-    |vm, host, roots, args, prototype| vm.construct_weakmap(host, roots, &args, prototype),
-)];
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    const WEAK_MAP_INTRINSICS: &[IntrinsicDef<P>] = &[IntrinsicDef::constructor(
+        WEAK_MAP,
+        1,
+        |vm, _, roots, _, _| vm.throw_type_error(roots, "WeakMap requires new"),
+        |vm, host, roots, args, prototype| vm.construct_weakmap(host, roots, &args, prototype),
+    )];
+}
 
 #[yield_binding_macros::builtin_global(name = "WeakSet", root = "weakset", kind = "constructor")]
 mod weak_set_members {
@@ -345,12 +365,14 @@ mod weak_set_members {
     }
 }
 
-const WEAK_SET_INTRINSICS: &[IntrinsicDef] = &[IntrinsicDef::constructor(
-    WEAK_SET,
-    1,
-    |vm, _, roots, _, _| vm.throw_type_error(roots, "WeakSet requires new"),
-    |vm, host, roots, args, prototype| vm.construct_weakset(host, roots, &args, prototype),
-)];
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    const WEAK_SET_INTRINSICS: &[IntrinsicDef<P>] = &[IntrinsicDef::constructor(
+        WEAK_SET,
+        1,
+        |vm, _, roots, _, _| vm.throw_type_error(roots, "WeakSet requires new"),
+        |vm, host, roots, args, prototype| vm.construct_weakset(host, roots, &args, prototype),
+    )];
+}
 
 fn same_value_zero(a: &Value, b: &Value) -> bool {
     a == b
@@ -449,9 +471,9 @@ impl VmCore {
         id
     }
 
-    fn construct_weakmap(
+    fn construct_weakmap<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         prototype: Option<ObjectId>,
@@ -465,9 +487,9 @@ impl VmCore {
         self.populate_collection(host, roots, collection, args, "set")
     }
 
-    fn weakmap_method(
+    fn weakmap_method<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         method: WeakMapMethod,
         receiver: &Value,
@@ -543,9 +565,9 @@ impl VmCore {
         }))
     }
 
-    fn construct_weakset(
+    fn construct_weakset<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         prototype: Option<ObjectId>,
@@ -592,9 +614,9 @@ impl VmCore {
         }))
     }
 
-    fn construct_collection(
+    fn construct_collection<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         kind: CollectionKind,
         args: &[Value],
@@ -618,9 +640,9 @@ impl VmCore {
         self.populate_collection(host, roots, collection, args, adder_name)
     }
 
-    fn populate_collection(
+    fn populate_collection<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         collection: Value,
         args: &[Value],
@@ -675,9 +697,9 @@ impl VmCore {
         }
     }
 
-    fn collection_add_item(
+    fn collection_add_item<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         entry_pairs: bool,
         collection: &Value,
@@ -704,9 +726,9 @@ impl VmCore {
         self.invoke(host, roots, adder, Arguments::Values(&args), collection)
     }
 
-    fn collection_method(
+    fn collection_method<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         kind: CollectionKind,
         method: CollectionMethod,
@@ -817,9 +839,9 @@ impl VmCore {
         }
     }
 
-    fn map_get_or_insert_computed(
+    fn map_get_or_insert_computed<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         key: &Value,
@@ -875,9 +897,9 @@ impl VmCore {
             .map(|(_, value)| value.clone()))
     }
 
-    fn map_group_by(
+    fn map_group_by<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -951,9 +973,9 @@ impl VmCore {
         ))))
     }
 
-    fn set_operation(
+    fn set_operation<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         operation: SetOperation,
         receiver: &Value,
@@ -989,9 +1011,9 @@ impl VmCore {
         }
     }
 
-    fn get_set_record(
+    fn get_set_record<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         other: &Value,
     ) -> Result<Result<SetRecord, Value>, VmError> {
@@ -1082,9 +1104,9 @@ impl VmCore {
         }))
     }
 
-    fn call_set_has(
+    fn call_set_has<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         record: &SetRecord,
         value: &Value,
@@ -1104,18 +1126,18 @@ impl VmCore {
         }
     }
 
-    fn set_keys_iterator(
+    fn set_keys_iterator<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         record: &SetRecord,
     ) -> Result<Result<(Value, Value), Value>, VmError> {
         self.get_iterator_from_method(host, roots, &record.object, &record.keys)
     }
 
-    fn set_union(
+    fn set_union<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         record: &SetRecord,
@@ -1141,9 +1163,9 @@ impl VmCore {
         Ok(Invocation::Value(self.alloc_set(result)))
     }
 
-    fn set_intersection(
+    fn set_intersection<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         record: &SetRecord,
@@ -1186,9 +1208,9 @@ impl VmCore {
         Ok(Invocation::Value(self.alloc_set(result)))
     }
 
-    fn set_difference(
+    fn set_difference<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         record: &SetRecord,
@@ -1229,9 +1251,9 @@ impl VmCore {
         Ok(Invocation::Value(self.alloc_set(result)))
     }
 
-    fn set_symmetric_difference(
+    fn set_symmetric_difference<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         record: &SetRecord,
@@ -1264,9 +1286,9 @@ impl VmCore {
         Ok(Invocation::Value(self.alloc_set(result)))
     }
 
-    fn set_is_subset_of(
+    fn set_is_subset_of<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         record: &SetRecord,
@@ -1288,9 +1310,9 @@ impl VmCore {
         Ok(Invocation::Value(Value::boolean(true)))
     }
 
-    fn set_is_superset_of(
+    fn set_is_superset_of<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         record: &SetRecord,
@@ -1319,9 +1341,9 @@ impl VmCore {
         Ok(Invocation::Value(Value::boolean(true)))
     }
 
-    fn set_is_disjoint_from(
+    fn set_is_disjoint_from<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         record: &SetRecord,
@@ -1491,3 +1513,5 @@ fn collection_slot_method<T>(
         _ => unreachable!(),
     }
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

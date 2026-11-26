@@ -15,7 +15,7 @@ use crate::gc::ActiveRoots;
 use crate::heap::{
     Attributes, DescriptorUpdate, ITERATOR_SYMBOL, Object, PlainObject, TO_STRING_TAG_SYMBOL,
 };
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::{Arguments, Invocation};
 use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
@@ -57,21 +57,23 @@ macro_rules! methods {
         const METHODS: &[(&str, IntrinsicKey)] = &[
             $(($name, IntrinsicKey::new(NAME, Slot::Prototype, $name))),+
         ];
-        const INTRINSICS: &[IntrinsicDef] = &[
-            IntrinsicDef::constructor(CONSTRUCTOR, 0,
-                |vm, _, roots, _, _| vm.throw_type_error(roots, "URLSearchParams requires new"),
-                |vm, host, roots, args, prototype| vm.construct_search_params(host, roots, &args, prototype),
-            ),
-            IntrinsicDef::call(SIZE, 0, |vm, host, roots, _, receiver| {
-                vm.search_params_method(host, roots, receiver, &[], Method::Size, 0)
-            }),
-            IntrinsicDef::call(NEXT, 0, |vm, _, roots, _, receiver| vm.search_params_next(roots, receiver)),
-            $(IntrinsicDef::call(IntrinsicKey::new(NAME, Slot::Prototype, $name), $length,
-                |vm, host, roots, args, receiver| {
-                    vm.search_params_method(host, roots, receiver, &args, Method::$method, $length)
-                },
-            )),+
-        ];
+        impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+            const INTRINSICS: &[IntrinsicDef<P>] = &[
+                IntrinsicDef::constructor(CONSTRUCTOR, 0,
+                    |vm, _, roots, _, _| vm.throw_type_error(roots, "URLSearchParams requires new"),
+                    |vm, host, roots, args, prototype| vm.construct_search_params(host, roots, &args, prototype),
+                ),
+                IntrinsicDef::call(SIZE, 0, |vm, host, roots, _, receiver| {
+                    vm.search_params_method(host, roots, receiver, &[], Method::Size, 0)
+                }),
+                IntrinsicDef::call(NEXT, 0, |vm, _, roots, _, receiver| vm.search_params_next(roots, receiver)),
+                $(IntrinsicDef::call(IntrinsicKey::new(NAME, Slot::Prototype, $name), $length,
+                    |vm, host, roots, args, receiver| {
+                        vm.search_params_method(host, roots, receiver, &args, Method::$method, $length)
+                    },
+                )),+
+            ];
+        }
     };
 }
 
@@ -90,7 +92,10 @@ methods! {
     ForEach => "forEach" / 1,
 }
 
-pub(crate) const PARAMS_OWNER: Owner = Owner::new(ROOT, ROOTS, &[INTRINSICS], Some(install));
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const PARAMS_OWNER: Owner<P> =
+        Owner::new(ROOT, ROOTS, &[Self::INTRINSICS], Some(install));
+}
 
 fn install(vm: &mut VmCore, _: &Value) {
     let prototype = vm.builtins.get(PROTOTYPE);
@@ -160,9 +165,9 @@ macro_rules! convert {
 }
 
 impl VmCore {
-    fn params_usv(
+    fn params_usv<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Completion<String> {
@@ -171,9 +176,9 @@ impl VmCore {
             .map(|string| usv_string(&string)))
     }
 
-    fn construct_search_params(
+    fn construct_search_params<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         prototype: Option<ObjectId>,
@@ -217,9 +222,9 @@ impl VmCore {
         Ok(Invocation::Value(Value::object(id)))
     }
 
-    fn params_from_record(
+    fn params_from_record<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         init: &Value,
         id: ObjectId,
@@ -261,9 +266,9 @@ impl VmCore {
         Ok(Ok(pairs))
     }
 
-    fn params_from_sequence(
+    fn params_from_sequence<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         init: &Value,
         method: &Value,
@@ -292,9 +297,9 @@ impl VmCore {
         Ok(Ok(pairs))
     }
 
-    fn params_pair(
+    fn params_pair<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         item: &Value,
     ) -> Completion<Option<(String, String)>> {
@@ -328,9 +333,9 @@ impl VmCore {
         Ok(Ok(if extra { None } else { name.zip(value) }))
     }
 
-    fn search_params_method(
+    fn search_params_method<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         args: &[Value],
@@ -459,9 +464,9 @@ impl VmCore {
         Ok(Invocation::Value(Value::UNDEFINED))
     }
 
-    fn search_params_for_each(
+    fn search_params_for_each<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         id: ObjectId,
@@ -535,3 +540,5 @@ impl VmCore {
         self.iterator_result(value, false)
     }
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

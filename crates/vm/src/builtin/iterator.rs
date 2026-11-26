@@ -6,7 +6,7 @@ use crate::heap::{
     ASYNC_DISPOSE_SYMBOL, Attributes, DISPOSE_SYMBOL, DescriptorUpdate, ITERATOR_SYMBOL, Object,
     PlainObject, ReactionJob, TO_STRING_TAG_SYMBOL,
 };
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::resolve::AwaitPrepared;
 use crate::runtime::{Arguments, Invocation, Settlement};
@@ -42,7 +42,9 @@ pub(crate) const ROOTS: &[RootSpec] = &[
     ),
 ];
 
-pub(crate) const OWNER: Owner = Owner::new(ROOT, &[], &[], None);
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const OWNER: Owner<P> = Owner::new(ROOT, &[], &[], None);
+}
 
 const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new("Iterator", Slot::Global, "");
 const FROM: IntrinsicKey = IntrinsicKey::new("Iterator", Slot::Static, "from");
@@ -69,13 +71,15 @@ const TAG_SET: IntrinsicKey =
 
 macro_rules! iterator_methods {
     ($($name:literal: $method:ident / $length:literal),* $(,)?; $($other:expr),* $(,)?) => {
-        pub(crate) const INTRINSICS: &[IntrinsicDef] = &[
-            $(IntrinsicDef::call(IntrinsicKey::new("Iterator", Slot::Prototype, $name), $length,
-                |vm, host, roots, args, receiver| {
-                    helpers::invoke(Method::$method, vm, host, roots, Arguments::Values(&args), receiver)
-                }),)*
-            $($other,)*
-        ];
+        impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+            pub(crate) const INTRINSICS: &[IntrinsicDef<P>] = &[
+                $(IntrinsicDef::call(IntrinsicKey::new("Iterator", Slot::Prototype, $name), $length,
+                    |vm, host, roots, args, receiver| {
+                        helpers::invoke(Method::$method, vm, host, roots, Arguments::Values(&args), receiver)
+                    }),)*
+                $($other,)*
+            ];
+        }
         const METHODS: &[(&str, IntrinsicKey)] = &[
             $(($name, IntrinsicKey::new("Iterator", Slot::Prototype, $name)),)*
         ];
@@ -188,9 +192,9 @@ iterator_methods!(
     }),
 );
 
-fn construct(
+fn construct<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     _args: Vec<Value>,
     new_target: &Value,
@@ -211,9 +215,9 @@ fn construct(
     )))
 }
 
-fn from(
+fn from<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     item: &Value,
 ) -> Result<Invocation, VmError> {
@@ -236,9 +240,9 @@ fn from(
     }
 }
 
-fn forward(
+fn forward<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     receiver: &Value,
     returning: bool,
@@ -266,9 +270,9 @@ fn forward(
 }
 
 // SetterThatIgnoresPrototypeProperties (ECMA-262 §7.3.37).
-fn set_own(
+fn set_own<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     value: Value,
     receiver: &Value,
@@ -304,9 +308,9 @@ fn set_own(
     })
 }
 
-fn return_method(
+fn return_method<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     receiver: &Value,
 ) -> Result<Invocation, VmError> {
@@ -404,3 +408,5 @@ pub(crate) fn install(vm: &mut VmCore, identity: &Value) {
         );
     }
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

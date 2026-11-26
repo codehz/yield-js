@@ -174,16 +174,16 @@ impl ArrayFromAsyncJob {
     }
 }
 
-struct ArrayAsync<'a> {
+struct ArrayAsync<'a, P: PlatformServices> {
     vm: &'a mut VmCore,
-    host: &'a Host,
+    host: &'a Host<P>,
     roots: &'a ActiveRoots<'a>,
 }
 
 impl VmCore {
-    pub(super) fn array_from_async(
+    pub(super) fn array_from_async<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         ctor: &Value,
         args: &[Value],
@@ -203,9 +203,9 @@ impl VmCore {
         Ok(Invocation::Value(Value::object(result)))
     }
 
-    pub(crate) fn resume_array_from_async(
+    pub(crate) fn resume_array_from_async<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         job: &ArrayFromAsyncJob,
         settlement: &Settlement,
@@ -246,7 +246,7 @@ impl VmCore {
     }
 }
 
-impl ArrayAsync<'_> {
+impl<P: PlatformServices> ArrayAsync<'_, P> {
     fn reject(&mut self, result: ObjectId, reason: Value) -> Result<(), VmError> {
         self.vm.settle(result, Settlement::Rejected(reason))
     }

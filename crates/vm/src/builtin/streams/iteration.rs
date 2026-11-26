@@ -13,7 +13,7 @@ use crate::heap::{
     ASYNC_ITERATOR_SYMBOL, Attributes, Heap, ITERATOR_SYMBOL, Object, OwnedEdge, PlainObject,
     PromiseState, TO_STRING_TAG_SYMBOL, push_value,
 };
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::{Arguments, Invocation, Settlement};
 use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
@@ -29,48 +29,54 @@ const ITERATE: IntrinsicKey = IntrinsicKey::new(
     Slot::PrototypeSymbol,
     "asyncIterator",
 );
-pub(super) const FROM: IntrinsicDef = IntrinsicDef::call(
-    IntrinsicKey::new("ReadableStream", Slot::Static, "from"),
-    1,
-    from,
-);
-pub(super) const VALUES: IntrinsicDef = IntrinsicDef::call(
-    IntrinsicKey::new("ReadableStream", Slot::Prototype, "values"),
-    0,
-    values,
-);
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(super) const FROM: IntrinsicDef<P> = IntrinsicDef::call(
+        IntrinsicKey::new("ReadableStream", Slot::Static, "from"),
+        1,
+        from,
+    );
+}
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(super) const VALUES: IntrinsicDef<P> = IntrinsicDef::call(
+        IntrinsicKey::new("ReadableStream", Slot::Prototype, "values"),
+        0,
+        values,
+    );
+}
 
-pub(crate) const INTRINSICS: &[IntrinsicDef] = &[
-    FROM,
-    VALUES,
-    IntrinsicDef::call(NEXT, 0, |vm, host, roots, _, receiver| {
-        vm.queue_iterator_request(host, roots, receiver, None)
-    }),
-    IntrinsicDef::call(RETURN, 1, |vm, host, roots, args, receiver| {
-        vm.queue_iterator_request(host, roots, receiver, Some(arg(&args, 0).clone()))
-    }),
-    IntrinsicDef::call(ITERATE, 0, |_, _, _, _, receiver| {
-        Ok(Invocation::Value(receiver.clone()))
-    }),
-];
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const INTRINSICS: &[IntrinsicDef<P>] = &[
+        Self::FROM,
+        Self::VALUES,
+        IntrinsicDef::call(NEXT, 0, |vm, host, roots, _, receiver| {
+            vm.queue_iterator_request(host, roots, receiver, None)
+        }),
+        IntrinsicDef::call(RETURN, 1, |vm, host, roots, args, receiver| {
+            vm.queue_iterator_request(host, roots, receiver, Some(arg(&args, 0).clone()))
+        }),
+        IntrinsicDef::call(ITERATE, 0, |_, _, _, _, receiver| {
+            Ok(Invocation::Value(receiver.clone()))
+        }),
+    ];
+}
 
 pub(crate) fn install(vm: &mut VmCore) {
     let stream = vm.builtins.get("readableStream");
     let prototype = vm.builtins.get("readableStream.prototype");
-    let from = vm.alloc_intrinsic(FROM.key);
+    let from = vm.alloc_intrinsic(BuiltinTable::<crate::host::Platform>::FROM.key);
     define_builtin_data(
         vm,
         stream,
-        FROM.key.member,
+        BuiltinTable::<crate::host::Platform>::FROM.key.member,
         Value::object(from),
         Attributes::ORDINARY,
     );
     // Web IDL requires `values` and `[Symbol.asyncIterator]` to be one function.
-    let values = vm.alloc_intrinsic(VALUES.key);
+    let values = vm.alloc_intrinsic(BuiltinTable::<crate::host::Platform>::VALUES.key);
     define_builtin_data(
         vm,
         prototype,
-        VALUES.key.member,
+        BuiltinTable::<crate::host::Platform>::VALUES.key.member,
         Value::object(values),
         Attributes::ORDINARY,
     );
@@ -207,9 +213,9 @@ macro_rules! script {
     };
 }
 
-fn from(
+fn from<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     _: &Value,
@@ -258,9 +264,9 @@ fn from(
     Ok(Invocation::Value(Value::object(stream)))
 }
 
-fn values(
+fn values<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -328,9 +334,9 @@ impl VmCore {
         }
     }
 
-    pub(super) fn pull_from_iterator(
+    pub(super) fn pull_from_iterator<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         source: ObjectId,
         stream: ObjectId,
@@ -343,9 +349,9 @@ impl VmCore {
         self.begin_from_flight(host, roots, source, Some(stream), sync, result)
     }
 
-    pub(super) fn cancel_from_iterator(
+    pub(super) fn cancel_from_iterator<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         source: ObjectId,
         reason: &Value,
@@ -371,9 +377,9 @@ impl VmCore {
         self.begin_from_flight(host, roots, source, None, sync, result)
     }
 
-    fn begin_from_flight(
+    fn begin_from_flight<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         source: ObjectId,
         stream: Option<ObjectId>,
@@ -422,9 +428,9 @@ impl VmCore {
         Ok(output)
     }
 
-    fn result_parts(
+    fn result_parts<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         result: &Value,
     ) -> Result<Result<(bool, Value), Value>, VmError> {
@@ -449,9 +455,9 @@ impl VmCore {
         Ok(Ok((false, value)))
     }
 
-    fn resume_source_iteration(
+    fn resume_source_iteration<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         source: ObjectId,
         stage: IterationStage,
@@ -514,9 +520,9 @@ impl VmCore {
         }
     }
 
-    fn queue_iterator_request(
+    fn queue_iterator_request<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         reason: Option<Value>,
@@ -546,9 +552,9 @@ impl VmCore {
         Ok(Invocation::Value(Value::object(result)))
     }
 
-    fn run_iterator_request(
+    fn run_iterator_request<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
     ) -> Result<(), VmError> {
@@ -663,9 +669,9 @@ impl VmCore {
         Ok(())
     }
 
-    pub(super) fn resume_iteration_job(
+    pub(super) fn resume_iteration_job<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
         stage: IterationStage,
@@ -833,3 +839,5 @@ pub(super) fn validate_record(heap: &Heap, id: ObjectId, object: &Object) -> boo
         _ => true,
     }
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

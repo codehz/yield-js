@@ -92,11 +92,11 @@ impl EventModule {
     }
 }
 
-fn event_host() -> Host {
+fn event_host() -> Host<impl yield_vm::PlatformServices> {
     host! {
         dts: "../dts/event-fixture.d.ts",
         modules: [EventModule],
-        services: { std::rc::Rc<dyn yield_vm::Diagnostics> => std::rc::Rc::new(super::support::UnexpectedUncaught) },
+        services: { diagnostics: super::support::UnexpectedUncaught },
     }
     .unwrap()
 }

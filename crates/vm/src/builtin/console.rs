@@ -21,13 +21,17 @@ macro_rules! console_methods {
         #[derive(Clone, Copy)]
         enum Method { $($variant),+ }
 
-        const METHODS: &[IntrinsicDef] = &[$(IntrinsicDef::call(
-            IntrinsicKey::new("console", Slot::Static, $name),
-            0,
-            |vm, host, roots, args, _| state::call(vm, host, roots, &args, Method::$variant),
-        )),+];
+        impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+            const METHODS: &[IntrinsicDef<P>] = &[$(IntrinsicDef::call(
+                IntrinsicKey::new("console", Slot::Static, $name),
+                0,
+                |vm, host, roots, args, _| state::call(vm, host, roots, &args, Method::$variant),
+            )),+];
+        }
 
-        pub(super) const OWNER: Owner = Owner::new("console", ROOTS, &[METHODS], Some(install));
+        impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+            pub(super) const OWNER: Owner<P> = Owner::new("console", ROOTS, &[Self::METHODS], Some(install));
+        }
     };
 }
 
@@ -41,7 +45,7 @@ console_methods! {
 
 fn install(vm: &mut VmCore, _: &Value) {
     let object = vm.builtins.get("console");
-    for method in METHODS {
+    for method in BuiltinTable::<crate::host::Platform>::METHODS {
         let key = method.key;
         let function = vm.alloc_intrinsic(key);
         define_builtin_data(
@@ -60,3 +64,5 @@ fn install(vm: &mut VmCore, _: &Value) {
         Attributes::FUNCTION_METADATA,
     );
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

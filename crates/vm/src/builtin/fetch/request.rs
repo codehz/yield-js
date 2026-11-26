@@ -13,7 +13,7 @@ use crate::builtin::{
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{AbortSignalState, Attributes, Object, PlainObject, TO_STRING_TAG_SYMBOL};
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{ObjectId, PropertyKey, Value, ValueRef};
@@ -59,16 +59,18 @@ macro_rules! definitions {
     ($($prop:literal => $getter:expr),+; $($method:literal => $mode:ident),+) => {
         const GETTERS: &[&str] = &[$($prop),+];
         const METHODS: &[&str] = &["clone", $($method),+];
-        const INTRINSICS: &[IntrinsicDef] = &[
-            IntrinsicDef::constructor(CONSTRUCTOR, 1, |vm, _, roots, _, _| vm.throw_type_error(roots, "Request requires new"),
-                |vm, host, roots, args, prototype| construct(vm, host, roots, &args, prototype)),
-            IntrinsicDef::call(IntrinsicKey::new(NAME, Slot::Prototype, "clone"), 0,
-                |vm, host, roots, _, this| clone_request(vm, host, roots, this)),
-            $(IntrinsicDef::call(IntrinsicKey::new(NAME, Slot::PrototypeGetter, $prop), 0,
-                |vm, _, roots, _, this| read(vm, roots, this, $getter))),+
-            ,$(IntrinsicDef::call(IntrinsicKey::new(NAME, Slot::Prototype, $method), 0,
-                |vm, host, roots, _, this| consume(vm, host, roots, this, BodyMode::$mode))),+
-        ];
+        impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+            const INTRINSICS: &[IntrinsicDef<P>] = &[
+                IntrinsicDef::constructor(CONSTRUCTOR, 1, |vm, _, roots, _, _| vm.throw_type_error(roots, "Request requires new"),
+                    |vm, host, roots, args, prototype| construct(vm, host, roots, &args, prototype)),
+                IntrinsicDef::call(IntrinsicKey::new(NAME, Slot::Prototype, "clone"), 0,
+                    |vm, host, roots, _, this| clone_request(vm, host, roots, this)),
+                $(IntrinsicDef::call(IntrinsicKey::new(NAME, Slot::PrototypeGetter, $prop), 0,
+                    |vm, _, roots, _, this| read(vm, roots, this, $getter))),+
+                ,$(IntrinsicDef::call(IntrinsicKey::new(NAME, Slot::Prototype, $method), 0,
+                    |vm, host, roots, _, this| consume(vm, host, roots, this, BodyMode::$mode))),+
+            ];
+        }
     };
 }
 
@@ -86,7 +88,10 @@ definitions! {
     "arrayBuffer" => ArrayBuffer, "blob" => Blob, "bytes" => Bytes, "text" => Text, "json" => Json, "formData" => FormData
 }
 
-pub(crate) const REQUEST_OWNER: Owner = Owner::new(ROOT, ROOTS, &[INTRINSICS], Some(install));
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const REQUEST_OWNER: Owner<P> =
+        Owner::new(ROOT, ROOTS, &[Self::INTRINSICS], Some(install));
+}
 
 fn install(vm: &mut VmCore, _: &Value) {
     install_interface(vm, NAME, ROOT, PROTOTYPE, GETTERS, METHODS);
@@ -190,9 +195,9 @@ fn read(
     Ok(Invocation::Value(getter(data, vm)))
 }
 
-fn consume(
+fn consume<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     this: &Value,
     mode: BodyMode,
@@ -260,9 +265,9 @@ const INIT: &[&str] = &[
     "window",
 ];
 
-fn enum_string(
+fn enum_string<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     value: &Value,
     names: &[&str],
@@ -280,9 +285,9 @@ fn enum_string(
 }
 
 impl VmCore {
-    pub(crate) fn request_from_fetch(
+    pub(crate) fn request_from_fetch<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         input: &Value,
         init: &Value,
@@ -299,9 +304,9 @@ impl VmCore {
     }
 }
 
-fn construct(
+fn construct<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: &[Value],
     prototype: Option<ObjectId>,
@@ -559,9 +564,9 @@ fn construct(
     Ok(Invocation::Value(Value::object(id)))
 }
 
-fn clone_request(
+fn clone_request<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     this: &Value,
 ) -> Result<Invocation, VmError> {
@@ -586,3 +591,5 @@ fn clone_request(
         },
     ))))
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

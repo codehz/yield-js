@@ -3,7 +3,7 @@
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, Heap, ITERATOR_SYMBOL, Object, PlainObject};
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::runtime::Invocation;
 use crate::value::{ObjectId, PropertyKey, Value, ValueRef};
 use crate::vm::VmCore;
@@ -56,9 +56,9 @@ impl VmCore {
         Ok(Invocation::Value(Value::object(iterator)))
     }
 
-    pub(crate) fn array_iterator_next(
+    pub(crate) fn array_iterator_next<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
     ) -> Result<Invocation, VmError> {

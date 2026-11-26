@@ -32,23 +32,25 @@ pub(crate) const ROOTS: &[RootSpec] = &[
     .fixed(ROOT),
 ];
 
-pub(crate) const INTRINSICS: &[IntrinsicDef] = &[
-    IntrinsicDef::call(NEXT, 1, |vm, host, roots, args, receiver| {
-        let argument = args.into_iter().next().unwrap_or(Value::UNDEFINED);
-        vm.resume_generator(host, roots, receiver, GeneratorCompletion::Next, argument)
-    }),
-    IntrinsicDef::call(RETURN, 1, |vm, host, roots, args, receiver| {
-        let argument = args.into_iter().next().unwrap_or(Value::UNDEFINED);
-        vm.resume_generator(host, roots, receiver, GeneratorCompletion::Return, argument)
-    }),
-    IntrinsicDef::call(THROW, 1, |vm, host, roots, args, receiver| {
-        let argument = args.into_iter().next().unwrap_or(Value::UNDEFINED);
-        vm.resume_generator(host, roots, receiver, GeneratorCompletion::Throw, argument)
-    }),
-    IntrinsicDef::call(ITERABLE, 0, |_, _, _, _, receiver| {
-        Ok(Invocation::Value(receiver.clone()))
-    }),
-];
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const INTRINSICS: &[IntrinsicDef<P>] = &[
+        IntrinsicDef::call(NEXT, 1, |vm, host, roots, args, receiver| {
+            let argument = args.into_iter().next().unwrap_or(Value::UNDEFINED);
+            vm.resume_generator(host, roots, receiver, GeneratorCompletion::Next, argument)
+        }),
+        IntrinsicDef::call(RETURN, 1, |vm, host, roots, args, receiver| {
+            let argument = args.into_iter().next().unwrap_or(Value::UNDEFINED);
+            vm.resume_generator(host, roots, receiver, GeneratorCompletion::Return, argument)
+        }),
+        IntrinsicDef::call(THROW, 1, |vm, host, roots, args, receiver| {
+            let argument = args.into_iter().next().unwrap_or(Value::UNDEFINED);
+            vm.resume_generator(host, roots, receiver, GeneratorCompletion::Throw, argument)
+        }),
+        IntrinsicDef::call(ITERABLE, 0, |_, _, _, _, receiver| {
+            Ok(Invocation::Value(receiver.clone()))
+        }),
+    ];
+}
 
 impl VmCore {
     pub(crate) fn install_generator_methods(&mut self) {
@@ -93,3 +95,5 @@ impl VmCore {
         );
     }
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

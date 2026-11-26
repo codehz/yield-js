@@ -7,7 +7,7 @@ use crate::gc::ActiveRoots;
 use crate::heap::{
     Attributes, DescriptorUpdate, Object, OwnProperty, Property, string_own_property,
 };
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::ops;
 use crate::runtime::{Arguments, Invocation};
 use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
@@ -18,9 +18,9 @@ impl VmCore {
     /// ToObject runs before ToPropertyKey, so a nullish target throws without
     /// evaluating a key conversion. The lookup is [[GetOwnProperty]], which
     /// gives proxy traps their invariants and exposes string indices.
-    pub(crate) fn object_has_own(
+    pub(crate) fn object_has_own<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -43,9 +43,9 @@ impl VmCore {
         }
     }
 
-    pub(crate) fn object_keys(
+    pub(crate) fn object_keys<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -73,9 +73,9 @@ impl VmCore {
     /// [[OwnPropertyKeys]] order is preserved, so proxy traps run once and the
     /// filter keeps string keys ahead of symbol keys. Primitive strings expose
     /// their UTF-16 index keys and `length`; other primitives have none.
-    pub(crate) fn object_own_property_keys(
+    pub(crate) fn object_own_property_keys<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         symbols: bool,
@@ -121,9 +121,9 @@ impl VmCore {
         )))
     }
 
-    pub(crate) fn object_values_or_entries(
+    pub(crate) fn object_values_or_entries<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         entries: bool,
@@ -185,9 +185,9 @@ impl VmCore {
         )))
     }
 
-    pub(crate) fn object_from_entries(
+    pub(crate) fn object_from_entries<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -216,9 +216,9 @@ impl VmCore {
         }
     }
 
-    fn add_object_entry(
+    fn add_object_entry<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         result: ObjectId,
         item: &Value,
@@ -252,9 +252,9 @@ impl VmCore {
     /// The result is a null-prototype object whose group arrays are ordinary
     /// writable, enumerable, configurable data properties. Every abrupt exit
     /// after GetIterator closes the iterator and keeps the original throw.
-    pub(crate) fn object_group_by(
+    pub(crate) fn object_group_by<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -327,9 +327,9 @@ impl VmCore {
         Ok(Invocation::Value(Value::object(result)))
     }
 
-    pub(crate) fn get_own_property_descriptor(
+    pub(crate) fn get_own_property_descriptor<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         reflect: bool,
@@ -412,9 +412,9 @@ impl VmCore {
         Ok(result)
     }
 
-    pub(crate) fn get_own_property_descriptors(
+    pub(crate) fn get_own_property_descriptors<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -473,9 +473,9 @@ impl VmCore {
         self.descriptor_object(property.into_owned(), attributes)
     }
 
-    pub(crate) fn define_property_builtin(
+    pub(crate) fn define_property_builtin<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         reflect: bool,
@@ -518,9 +518,9 @@ impl VmCore {
         self.apply_property_update(host, roots, target, key, update)
     }
 
-    pub(crate) fn object_assign(
+    pub(crate) fn object_assign<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -577,9 +577,9 @@ impl VmCore {
         Ok(Invocation::Value(target))
     }
 
-    pub(crate) fn define_properties(
+    pub(crate) fn define_properties<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
         properties: Option<&Value>,
@@ -636,9 +636,9 @@ impl VmCore {
         Ok(Invocation::Value(Value::object(target)))
     }
 
-    pub(crate) fn read_property_descriptor(
+    pub(crate) fn read_property_descriptor<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         descriptor: &Value,
     ) -> Result<Result<DescriptorUpdate, Value>, VmError> {
@@ -704,9 +704,9 @@ impl VmCore {
         Ok(Ok(update))
     }
 
-    pub(crate) fn apply_property_update(
+    pub(crate) fn apply_property_update<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
         key: PropertyKey,
@@ -719,9 +719,9 @@ impl VmCore {
         }
     }
 
-    pub(crate) fn try_apply_property_update(
+    pub(crate) fn try_apply_property_update<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
         key: PropertyKey,

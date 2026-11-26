@@ -22,15 +22,20 @@ macro_rules! attributes {
     };
 }
 
-pub(crate) const INTRINSICS: &[IntrinsicDef] = attributes![
-    (0, "onerror"),
-    (1, "onunhandledrejection"),
-    (2, "onrejectionhandled"),
-];
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const INTRINSICS: &[IntrinsicDef<P>] = attributes![
+        (0, "onerror"),
+        (1, "onunhandledrejection"),
+        (2, "onrejectionhandled"),
+    ];
+}
 
 pub(super) fn install(vm: &mut VmCore) {
     let global = vm.builtins.get("globalThis");
-    for [getter, setter] in INTRINSICS.as_chunks::<2>().0 {
+    for [getter, setter] in BuiltinTable::<crate::host::Platform>::INTRINSICS
+        .as_chunks::<2>()
+        .0
+    {
         let get = vm.alloc_intrinsic(getter.key);
         let set = vm.alloc_intrinsic(setter.key);
         super::event::install_accessor(vm, global, getter.key.member, get, Some(set), true)
@@ -89,3 +94,5 @@ fn access(
     }
     Ok(Invocation::Value(Value::UNDEFINED))
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

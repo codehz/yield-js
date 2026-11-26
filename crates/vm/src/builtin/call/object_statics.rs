@@ -6,7 +6,7 @@ use crate::gc::ActiveRoots;
 use crate::heap::{
     BoxedPrimitive, DescriptorUpdate, IntegrityLevel, Object, PlainObject, Property,
 };
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::runtime::Invocation;
 use crate::value::{ObjectId, Value, ValueRef};
 use crate::vm::VmCore;
@@ -51,9 +51,9 @@ impl VmCore {
         }
     }
 
-    pub(crate) fn object_create(
+    pub(crate) fn object_create<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -207,9 +207,9 @@ impl VmCore {
         }
     }
 
-    pub(crate) fn set_integrity(
+    pub(crate) fn set_integrity<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         level: IntegrityLevel,
@@ -260,9 +260,9 @@ impl VmCore {
         Ok(Invocation::Value(target.clone()))
     }
 
-    pub(crate) fn test_integrity(
+    pub(crate) fn test_integrity<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         level: IntegrityLevel,

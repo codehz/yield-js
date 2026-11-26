@@ -13,7 +13,7 @@ use crate::gc::ActiveRoots;
 use crate::heap::EventPayload;
 use crate::heap::HostClassRecord;
 use crate::heap::{Attributes, Heap, PromiseState, ReactionJob, RejectionStatus};
-use crate::host::{Completion, Host};
+use crate::host::{Completion, Diagnostics, Host, Platform, PlatformServices, TimerService};
 use crate::runtime::{
     Arguments, ContinuationTarget, ExecOutcome, HOST_TASK_ID_LIMIT, HostInstance, HostTask,
     HostTaskState, Invocation, Microtask, PendingOperation, Settlement,
@@ -23,7 +23,6 @@ use crate::value::{ContinuationId, ObjectId, PropertyKey, PropertyKeyRef, Value,
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
@@ -169,27 +168,6 @@ pub(crate) struct RestoredState {
     pub(crate) templates: Vec<ObjectId>,
     pub(crate) module_envs: Vec<Option<ObjectId>>,
     pub(crate) module_namespaces: Vec<ObjectId>,
-}
-
-/// Looks up the linked time service, falling back to the deterministic
-/// [`crate::host::DummyTimeService`].
-pub(crate) fn time_source(bindings: &crate::binding::Bindings) -> TimeSource {
-    TimeSource(
-        bindings
-            .builtin_services()
-            .time()
-            .cloned()
-            .unwrap_or_else(|| Arc::new(crate::host::DummyTimeService)),
-    )
-}
-
-/// Wall-clock source linked into a VM. `Debug` hides the trait object.
-pub(crate) struct TimeSource(Arc<dyn crate::host::TimeService>);
-
-impl std::fmt::Debug for TimeSource {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("TimeSource")
-    }
 }
 
 /// Runtime-only metadata indexed by the original, validated function table.
@@ -361,14 +339,22 @@ impl std::ops::Deref for VerifiedBuild {
     }
 }
 
-#[derive(Debug)]
-pub struct Vm {
+pub struct Vm<P: PlatformServices = Platform> {
     // The core drops its pending registrations before the host resources.
     pub(super) core: VmCore,
-    pub(super) host: Host,
+    pub(super) host: Host<P>,
 }
 
-impl Vm {
+impl<P: PlatformServices> std::fmt::Debug for Vm<P> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Vm")
+            .field("core", &self.core)
+            .field("host", &self.host)
+            .finish()
+    }
+}
+
+impl<P: PlatformServices> Vm<P> {
     /// Resolves an embedder service by its exact type. Cache the returned
     /// borrow for repeated reads; callbacks use their declared service scope.
     pub fn bind_service<T: Any>(&self) -> Option<&T> {
@@ -533,8 +519,6 @@ pub(crate) struct VmCore {
     pub(crate) templates: Vec<ObjectId>,
     pub(crate) random_state: u64,
     pub(crate) clock: crate::runtime::VmClock,
-    /// Wall-clock source for `Date` and file timestamps.
-    pub(crate) time: TimeSource,
     pub(crate) base_url: Option<url::Url>,
     pub(crate) fetch_environment: crate::fetch::FetchEnvironment,
     pub(crate) fetch_state: crate::builtin::fetch::transaction::FetchState,
@@ -548,13 +532,13 @@ pub(crate) struct VmCore {
 }
 
 impl VmCore {
-    pub(crate) fn monotonic_millis(&self, _: &Host) -> f64 {
+    pub(crate) fn monotonic_millis<P: PlatformServices>(&self, _: &Host<P>) -> f64 {
         self.clock.now()
     }
 
-    pub(crate) fn call_host(
+    pub(crate) fn call_host<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         target: NativeTarget,
         args: Arguments<'_>,
@@ -645,9 +629,9 @@ impl VmCore {
         result?.ok_or_else(|| VmError::InvalidState("ordinary host call suspended".to_owned()))
     }
 
-    fn run_host_steps(
+    fn run_host_steps<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         activation: HostActivation<'_>,
         mut entry: HostEntry,
@@ -893,9 +877,9 @@ impl VmCore {
         }
     }
 
-    fn resume_host_task(
+    fn resume_host_task<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: u64,
         settlement: &Settlement,
@@ -966,9 +950,9 @@ impl VmCore {
         }
     }
 
-    pub fn start(
+    pub fn start<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         entry: &str,
         args: Vec<JsValue>,
     ) -> Result<Value, VmError> {
@@ -1035,7 +1019,7 @@ impl VmCore {
 
     /// Runs queued VM microtasks and ordinary tasks. External timer/event
     /// delivery belongs to the host; it should call this after completing an operation.
-    pub fn run_until_idle(&mut self, host: &Host) -> Result<(), VmError> {
+    pub fn run_until_idle<P: PlatformServices>(&mut self, host: &Host<P>) -> Result<(), VmError> {
         loop {
             self.run_microtask_checkpoint(host)?;
             let delivered_subtle = self.pump_subtle_completion();
@@ -1070,7 +1054,10 @@ impl VmCore {
         }
     }
 
-    fn run_microtask_checkpoint(&mut self, host: &Host) -> Result<(), VmError> {
+    fn run_microtask_checkpoint<P: PlatformServices>(
+        &mut self,
+        host: &Host<P>,
+    ) -> Result<(), VmError> {
         while let Some(task) = self.microtasks.pop_front() {
             let roots = &ActiveRoots::EMPTY.with(&task);
             match task {
@@ -1151,9 +1138,9 @@ impl VmCore {
         Ok(())
     }
 
-    fn run_unhandled_batch(
+    fn run_unhandled_batch<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         mut batch: Vec<ObjectId>,
     ) -> Result<(), VmError> {
         for (index, &id) in batch.iter().enumerate() {
@@ -1171,9 +1158,9 @@ impl VmCore {
         Ok(())
     }
 
-    fn run_rejection_notification(
+    fn run_rejection_notification<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         handled: bool,
@@ -1222,7 +1209,7 @@ impl VmCore {
         }
         if result?
             && !handled
-            && let Some(sink) = host.builtin_services().diagnostics()
+            && let Some(sink) = host.platform().diagnostics()
         {
             sink.report(crate::host::Diagnostic::UnhandledRejection {
                 promise: self.host_value(Value::object(id)),
@@ -1350,7 +1337,10 @@ impl VmCore {
     /// Rearms recovered `Resume` / `Reissue` operations after publication.
     /// Driver failures deliver their declared rejection; a timer service fault
     /// is returned to the host without consuming other recovered operations.
-    pub(crate) fn start_recovered_operations(&mut self, host: &Host) -> Result<(), VmError> {
+    pub(crate) fn start_recovered_operations<P: PlatformServices>(
+        &mut self,
+        host: &Host<P>,
+    ) -> Result<(), VmError> {
         if self.recovered_operations.is_empty() {
             return Ok(());
         }
@@ -1400,9 +1390,9 @@ impl VmCore {
         Ok(())
     }
 
-    pub(crate) fn schedule_timeout(
+    pub(crate) fn schedule_timeout<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         signal: ObjectId,
         delay_ms: u64,
     ) -> Result<(), HostFault> {
@@ -1427,15 +1417,14 @@ impl VmCore {
             .expect("timeout remaining delay fits u64")
     }
 
-    fn arm_timeout(
-        host: &Host,
+    fn arm_timeout<P: PlatformServices>(
+        host: &Host<P>,
         token: OperationToken,
         delay_ms: u64,
     ) -> Result<Box<dyn LiveRegistration>, HostFault> {
-        host.builtin_services()
+        host.platform()
             .timer()
             .ok_or_else(|| HostFault::new("timer service is unavailable"))?
-            .clone()
             .arm(token, delay_ms)
     }
 
@@ -1668,9 +1657,9 @@ impl VmCore {
         Ok(())
     }
 
-    pub(crate) fn settle_outcome(
+    pub(crate) fn settle_outcome<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         promise: ObjectId,
         outcome: ExecOutcome,
@@ -1689,9 +1678,9 @@ impl VmCore {
         clippy::too_many_arguments,
         reason = "Explicit active roots at a guest call boundary"
     )]
-    pub(crate) fn call_function(
+    pub(crate) fn call_function<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         func_id: u32,
         parent_env: Option<ObjectId>,
@@ -1722,9 +1711,9 @@ impl VmCore {
         clippy::too_many_arguments,
         reason = "Explicit active roots at a guest call boundary"
     )]
-    pub(crate) fn activate(
+    pub(crate) fn activate<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         function_index: usize,
         parent_env: Option<ObjectId>,
@@ -1812,16 +1801,7 @@ impl VmCore {
         }
     }
 
-    /// The wall-clock source linked for this VM.
-    pub(crate) fn time(&self) -> &dyn crate::host::TimeService {
-        &*self.time.0
-    }
-
-    pub(crate) fn restored(
-        build: VerifiedBuild,
-        bindings: &Bindings,
-        state: RestoredState,
-    ) -> Self {
+    pub(crate) fn restored(build: VerifiedBuild, state: RestoredState) -> Self {
         let RestoredState {
             mut heap,
             continuations,
@@ -1875,7 +1855,6 @@ impl VmCore {
             .map(|(id, _)| *id)
             .collect();
         let caches = property_caches(&build);
-        let time = time_source(bindings);
         Self {
             property_caches: caches,
             build,
@@ -1911,7 +1890,6 @@ impl VmCore {
             templates,
             random_state: crate::builtin::math::RANDOM_SEED,
             clock,
-            time,
             base_url,
             fetch_environment,
             fetch_state,

@@ -13,7 +13,7 @@ use crate::builtin::roots::{RootKind, RootSpec};
 use crate::builtin::{FUNCTION_PARENT, OBJECT_PARENT};
 use crate::gc::ActiveRoots;
 use crate::heap::{Heap, Object, PlainObject, TransformAlgorithms, TransformStage};
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{ObjectId, Value, ValueRef};
@@ -112,9 +112,9 @@ interface!(DECODER_OWNER, "decompressionStream", "DecompressionStream", DECODER_
     },
 );
 
-fn construct(
+fn construct<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     target: &Value,
@@ -180,9 +180,9 @@ fn endpoint(
 }
 
 impl VmCore {
-    pub(super) fn invoke_compression_transform(
+    pub(super) fn invoke_compression_transform<P: PlatformServices>(
         &mut self,
-        host: &Host,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         stage: TransformStage,
@@ -236,3 +236,5 @@ pub(super) fn validate_wrapper(heap: &Heap, transform: ObjectId, decoding: bool)
     matches!(heap.get(transform), Ok(Object::TransformStream(stream))
         if stream.compression_brand == Some(decoding))
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

@@ -6,7 +6,7 @@ use crate::builtin::roots::{RootKind, RootSpec};
 use crate::builtin::{FUNCTION_PARENT, define_builtin_data, link_constructor};
 use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, DescriptorUpdate, Object, PlainObject, TO_STRING_TAG_SYMBOL};
-use crate::host::Host;
+use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{PropertyKey, PropertyKeyRef, Value, ValueRef};
@@ -31,18 +31,20 @@ const ROOTS: &[RootSpec] = &[
 
 macro_rules! getters {
     ($($name:literal => $get:expr),+ $(,)?) => {
-        const GETTERS: &[IntrinsicDef] = &[$(
-            IntrinsicDef::call(
-                IntrinsicKey::new("URLPattern", Slot::PrototypeGetter, $name),
-                0,
-                |vm, _, roots, _, receiver| {
-                    let Some(pattern) = receiver_pattern(vm, receiver)? else {
-                        return vm.throw_type_error(roots, "URLPattern getter called on incompatible receiver");
-                    };
-                    Ok(Invocation::Value(($get)(&pattern)))
-                },
-            ),
-        )+];
+        impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+            const GETTERS: &[IntrinsicDef<P>] = &[$(
+                IntrinsicDef::call(
+                    IntrinsicKey::new("URLPattern", Slot::PrototypeGetter, $name),
+                    0,
+                    |vm, _, roots, _, receiver| {
+                        let Some(pattern) = receiver_pattern(vm, receiver)? else {
+                            return vm.throw_type_error(roots, "URLPattern getter called on incompatible receiver");
+                        };
+                        Ok(Invocation::Value(($get)(&pattern)))
+                    },
+                ),
+            )+];
+        }
     };
 }
 
@@ -58,30 +60,38 @@ getters! {
     "hasRegExpGroups" => |p: &Pattern| Value::boolean(p.has_regexp_groups()),
 }
 
-const INTRINSICS: &[IntrinsicDef] = &[
-    IntrinsicDef::constructor_with_target(
-        CONSTRUCTOR,
-        0,
-        |vm, _, roots, _, _| vm.throw_type_error(roots, "URLPattern requires new"),
-        construct,
-    )
-    .without_new_target_prototype(),
-    IntrinsicDef::call(TEST, 0, |vm, host, roots, args, receiver| {
-        matches(vm, host, roots, &args, receiver, false)
-    }),
-    IntrinsicDef::call(EXEC, 0, |vm, host, roots, args, receiver| {
-        matches(vm, host, roots, &args, receiver, true)
-    }),
-];
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    const INTRINSICS: &[IntrinsicDef<P>] = &[
+        IntrinsicDef::constructor_with_target(
+            CONSTRUCTOR,
+            0,
+            |vm, _, roots, _, _| vm.throw_type_error(roots, "URLPattern requires new"),
+            construct,
+        )
+        .without_new_target_prototype(),
+        IntrinsicDef::call(TEST, 0, |vm, host, roots, args, receiver| {
+            matches(vm, host, roots, &args, receiver, false)
+        }),
+        IntrinsicDef::call(EXEC, 0, |vm, host, roots, args, receiver| {
+            matches(vm, host, roots, &args, receiver, true)
+        }),
+    ];
+}
 
-pub(crate) const PATTERN_OWNER: Owner =
-    Owner::new(ROOT, ROOTS, &[INTRINSICS, GETTERS], Some(install));
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const PATTERN_OWNER: Owner<P> = Owner::new(
+        ROOT,
+        ROOTS,
+        &[Self::INTRINSICS, Self::GETTERS],
+        Some(install),
+    );
+}
 
 fn install(vm: &mut VmCore, _: &Value) {
     let constructor = vm.builtins.get(ROOT);
     let prototype = vm.builtins.get(PROTOTYPE);
     link_constructor(vm, constructor, prototype);
-    for def in GETTERS {
+    for def in BuiltinTable::<crate::host::Platform>::GETTERS {
         let getter = vm.alloc_intrinsic(def.key);
         assert!(
             vm.heap
@@ -206,9 +216,9 @@ fn receiver_pattern(vm: &VmCore, receiver: &Value) -> Result<Option<Arc<Pattern>
     Ok(None)
 }
 
-fn coerce_usv(
+fn coerce_usv<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     value: &Value,
 ) -> Result<Result<String, Value>, VmError> {
@@ -218,9 +228,9 @@ fn coerce_usv(
     }))
 }
 
-fn convert_input(
+fn convert_input<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     value: &Value,
 ) -> Result<Result<StringOrInit<'static>, Value>, VmError> {
@@ -273,9 +283,9 @@ fn normalize_constructor_input(
     quirks::process_construct_pattern_input(input, base)
 }
 
-fn construct(
+fn construct<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     new_target: &Value,
@@ -336,9 +346,9 @@ fn construct(
     ))))
 }
 
-fn matches(
+fn matches<P: PlatformServices>(
     vm: &mut VmCore,
-    host: &Host,
+    host: &Host<P>,
     roots: &ActiveRoots<'_>,
     args: &[Value],
     receiver: &Value,
@@ -459,3 +469,5 @@ fn matches(
     }
     Ok(Invocation::Value(Value::object(object)))
 }
+
+pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

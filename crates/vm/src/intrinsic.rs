@@ -8,7 +8,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::binding::NativeTarget;
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
-use crate::host::Host;
+use crate::host::{Host, Platform, PlatformServices};
 use crate::runtime::Invocation;
 use crate::value::{ObjectId, Value, ValueRef};
 use crate::vm::VmCore;
@@ -78,34 +78,41 @@ impl IntrinsicKey {
     }
 }
 
-type Call =
-    fn(&mut VmCore, &Host, &ActiveRoots<'_>, Vec<Value>, &Value) -> Result<Invocation, VmError>;
-type Construct = fn(
+type Call<P> =
+    fn(&mut VmCore, &Host<P>, &ActiveRoots<'_>, Vec<Value>, &Value) -> Result<Invocation, VmError>;
+type Construct<P> = fn(
     &mut VmCore,
-    &Host,
+    &Host<P>,
     &ActiveRoots<'_>,
     Vec<Value>,
     Option<ObjectId>,
 ) -> Result<Invocation, VmError>;
-type ConstructWithTarget =
-    fn(&mut VmCore, &Host, &ActiveRoots<'_>, Vec<Value>, &Value) -> Result<Invocation, VmError>;
+type ConstructWithTarget<P> =
+    fn(&mut VmCore, &Host<P>, &ActiveRoots<'_>, Vec<Value>, &Value) -> Result<Invocation, VmError>;
 
-#[derive(Clone, Copy)]
-pub(crate) enum Construction {
-    WithPrototype(Construct),
-    WithNewTarget(ConstructWithTarget),
+pub(crate) enum Construction<P: PlatformServices> {
+    WithPrototype(Construct<P>),
+    WithNewTarget(ConstructWithTarget<P>),
 }
 
-pub(crate) struct IntrinsicDef {
+impl<P: PlatformServices> Copy for Construction<P> {}
+
+impl<P: PlatformServices> Clone for Construction<P> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+pub(crate) struct IntrinsicDef<P: PlatformServices> {
     pub key: IntrinsicKey,
     pub length: u32,
-    pub call: Call,
-    pub construct: Option<Construction>,
+    pub call: Call<P>,
+    pub construct: Option<Construction<P>>,
     pub skip_new_target_prototype: bool,
 }
 
-impl IntrinsicDef {
-    pub const fn call(key: IntrinsicKey, length: u32, call: Call) -> Self {
+impl<P: PlatformServices> IntrinsicDef<P> {
+    pub const fn call(key: IntrinsicKey, length: u32, call: Call<P>) -> Self {
         Self {
             key,
             length,
@@ -118,8 +125,8 @@ impl IntrinsicDef {
     pub const fn constructor(
         key: IntrinsicKey,
         length: u32,
-        call: Call,
-        construct: Construct,
+        call: Call<P>,
+        construct: Construct<P>,
     ) -> Self {
         Self {
             construct: Some(Construction::WithPrototype(construct)),
@@ -131,8 +138,8 @@ impl IntrinsicDef {
     pub const fn constructor_with_target(
         key: IntrinsicKey,
         length: u32,
-        call: Call,
-        construct: ConstructWithTarget,
+        call: Call<P>,
+        construct: ConstructWithTarget<P>,
     ) -> Self {
         Self {
             construct: Some(Construction::WithNewTarget(construct)),
@@ -150,14 +157,16 @@ impl IntrinsicDef {
 pub struct IntrinsicId(u32);
 
 impl IntrinsicId {
-    pub(crate) fn definition(self) -> &'static IntrinsicDef {
-        table().definitions[self.0 as usize]
+    pub(crate) fn definition<P: PlatformServices>(self) -> &'static IntrinsicDef<P> {
+        // Every specialization is built from the same ordered groups.
+        let (group, member) = table().positions[self.0 as usize];
+        &crate::builtin::globals::BuiltinTable::<P>::groups()[group][member]
     }
 }
 
 impl Serialize for IntrinsicId {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.definition().key.serialize(serializer)
+        self.definition::<Platform>().key.serialize(serializer)
     }
 }
 
@@ -196,7 +205,7 @@ pub(crate) enum CallableTarget {
 type LookupKey<'a> = (&'a str, Slot, &'a str);
 
 struct Table {
-    definitions: Vec<&'static IntrinsicDef>,
+    positions: Vec<(usize, usize)>,
     ids: BTreeMap<LookupKey<'static>, IntrinsicId>,
 }
 
@@ -204,23 +213,29 @@ fn table() -> &'static Table {
     static TABLE: OnceLock<Table> = OnceLock::new();
     TABLE.get_or_init(|| {
         let mut table = Table {
-            definitions: Vec::new(),
+            positions: Vec::new(),
             ids: BTreeMap::new(),
         };
-        for def in crate::builtin::globals::intrinsic_groups().flatten() {
-            let id =
-                IntrinsicId(u32::try_from(table.definitions.len()).expect("intrinsic ID overflow"));
-            let IntrinsicKey {
-                owner,
-                slot,
-                member,
-            } = def.key;
-            assert!(
-                table.ids.insert((owner, slot, member), id).is_none(),
-                "duplicate intrinsic key: {:?}",
-                def.key
-            );
-            table.definitions.push(def);
+        for (group, definitions) in crate::builtin::globals::BuiltinTable::<Platform>::groups()
+            .iter()
+            .enumerate()
+        {
+            for (index, def) in definitions.iter().enumerate() {
+                let id = IntrinsicId(
+                    u32::try_from(table.positions.len()).expect("intrinsic ID overflow"),
+                );
+                let IntrinsicKey {
+                    owner,
+                    slot,
+                    member,
+                } = def.key;
+                assert!(
+                    table.ids.insert((owner, slot, member), id).is_none(),
+                    "duplicate intrinsic key: {:?}",
+                    def.key
+                );
+                table.positions.push((group, index));
+            }
         }
         table
     })
