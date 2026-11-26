@@ -15,10 +15,10 @@ use crate::snapshot::DomState;
 
 macro_rules! define_dom_module {
     (
-        { $(($tag:literal, $class:ident, $ctor:ident, $mode:ident),)* }
+        { $(($tag:literal, $class:ident, $ctor:ident $(, from $owner:ident)?),)* }
         $($item:item)*
     ) => {
-        use super::element::{$($class),*};
+        use super::{$($($owner ::)? $class),*};
 
         #[host_module(
             name = "yield:dom",

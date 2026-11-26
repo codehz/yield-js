@@ -3,22 +3,38 @@
 //! `resolver.rs` holds the shared `Dom` helpers that map between node ids
 //! and JS handle instances.
 
-// Rows are (HTML tag, Rust class, constructor, declaration mode).
+// Rows declare a class here unless `from module` names the sibling that defines it.
 macro_rules! html_elements {
     ($consumer:ident $($extra:tt)*) => {
         $consumer! {
             {
-                ("iframe", HTMLIFrameElement, construct_iframe, plain),
-                ("input", HTMLInputElement, construct_input, custom),
-                ("button", HTMLButtonElement, construct_button, plain),
-                ("label", HTMLLabelElement, construct_label, plain),
-                ("ul", HTMLUListElement, construct_ul, plain),
-                ("li", HTMLLIElement, construct_li, plain),
+                ("iframe", HTMLIFrameElement, construct_iframe),
+                ("input", HTMLInputElement, construct_input, from input),
+                ("button", HTMLButtonElement, construct_button),
+                ("label", HTMLLabelElement, construct_label),
+                ("ul", HTMLUListElement, construct_ul),
+                ("li", HTMLLIElement, construct_li),
             }
             $($extra)*
         }
     };
 }
+
+macro_rules! declare_html_element {
+    ($class:ident) => {
+        #[yield_binding_macros::host_class(tag, parent = element::HTMLElement)]
+        struct $class;
+    };
+    ($class:ident, from $owner:ident) => {};
+}
+
+macro_rules! declare_html_elements {
+    ({ $(($tag:literal, $class:ident, $ctor:ident $(, from $owner:ident)?),)* }) => {
+        $(declare_html_element!($class $(, from $owner)?);)*
+    };
+}
+
+html_elements!(declare_html_elements);
 
 macro_rules! receiver_index {
     ($cx:ident, $this:ident) => {{

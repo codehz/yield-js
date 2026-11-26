@@ -15,25 +15,13 @@ pub(super) struct Element;
 #[host_class(tag = "HTMLElement", parent = Element)]
 pub(super) struct HTMLElement;
 
-macro_rules! declare_html_element {
-    (plain $class:ident) => {
-        #[host_class(tag, parent = HTMLElement)]
-        pub(super) struct $class;
-    };
-    (custom $class:ident) => {
-        pub(super) use super::input::$class;
-    };
-}
-
 macro_rules! bind_html_elements {
     (
-        { $(($tag:literal, $class:ident, $ctor:ident, $mode:ident),)* }
+        { $(($tag:literal, $class:ident, $ctor:ident $(, from $owner:ident)?),)* }
     ) => {
-        $(declare_html_element!($mode $class);)*
-
         pub(super) fn alloc_html_element(cx: &mut CallCx<'_>, tag: &str) -> JsResult<JsValue> {
             Ok(match tag {
-                $($tag => alloc_element(cx, $class)?.value(cx),)*
+                $($tag => alloc_element(cx, super::$($owner ::)? $class)?.value(cx),)*
                 _ => alloc_element(cx, HTMLElement)?.value(cx),
             })
         }
