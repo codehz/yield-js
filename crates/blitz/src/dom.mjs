@@ -1,10 +1,17 @@
-import { Node, Document, Element, HTMLIFrameElement, openDocument } from 'yield:dom';
+import { Node, Document, Element, HTMLIFrameElement, HTMLInputElement, openDocument } from 'yield:dom';
 
-export { HTMLIFrameElement };
+export { HTMLIFrameElement, HTMLInputElement };
 export const window = globalThis;
 export const document = openDocument(window);
 
+// Presence advertises native input event support to event consumers.
+Object.defineProperty(document, 'oninput', { value: null, configurable: true });
+
 const setAttributeNative = Element.prototype.setAttribute;
+const getAttributeNative = Element.prototype.getAttribute;
+const removeAttributeNative = Element.prototype.removeAttribute;
+const inputValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+const inputDefaultValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'defaultValue');
 const getElementByIdNative = Document.prototype.getElementById;
 const createElementNative = Document.prototype.createElement;
 const createTextNodeNative = Document.prototype.createTextNode;
@@ -15,6 +22,24 @@ const nodeType = Object.getOwnPropertyDescriptor(Node.prototype, 'nodeType').get
 Object.defineProperty(Element.prototype, 'setAttribute', {
   value: function setAttribute(name, value) {
     return setAttributeNative.call(this, String(name), String(value));
+  },
+});
+Object.defineProperty(Element.prototype, 'getAttribute', {
+  value: function getAttribute(name) { return getAttributeNative.call(this, String(name)); },
+});
+Object.defineProperty(Element.prototype, 'removeAttribute', {
+  value: function removeAttribute(name) { return removeAttributeNative.call(this, String(name)); },
+});
+Object.defineProperties(HTMLInputElement.prototype, {
+  value: { set(value) { inputValue.set.call(this, value === null ? '' : String(value)); } },
+  defaultValue: { set(value) { inputDefaultValue.set.call(this, String(value)); } },
+  type: {
+    get() { return getAttributeNative.call(this, 'type') || 'text'; },
+    set(value) { setAttributeNative.call(this, 'type', String(value)); },
+  },
+  name: {
+    get() { return getAttributeNative.call(this, 'name') || ''; },
+    set(value) { setAttributeNative.call(this, 'name', String(value)); },
   },
 });
 Object.defineProperty(Document.prototype, 'getElementById', {

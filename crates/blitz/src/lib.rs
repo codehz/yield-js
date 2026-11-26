@@ -22,11 +22,30 @@ use yield_vm::{
 
 const SHELL: &str = "<!doctype html><html><head></head><body><div id=\"root\"></div></body></html>";
 
+#[derive(Clone, Copy)]
+enum UserEvent {
+    Click,
+    Input,
+}
+
+impl UserEvent {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Click => "click",
+            Self::Input => "input",
+        }
+    }
+
+    fn cancelable(self) -> bool {
+        matches!(self, Self::Click)
+    }
+}
+
 struct Dom {
     doc: BaseDocument,
     nodes: Vec<NodeId>,
     handles: BTreeMap<NodeId, u32>,
-    click_target: Option<NodeId>,
+    pending_event: Option<(UserEvent, NodeId)>,
     resources: BTreeMap<String, Arc<[u8]>>,
 }
 
@@ -36,7 +55,7 @@ impl Dom {
             doc: HtmlDocument::from_html(SHELL, document_config()).into_inner(),
             nodes: Vec::new(),
             handles: BTreeMap::new(),
-            click_target: None,
+            pending_event: None,
             resources: Self::index_resources(resources),
         }
     }
@@ -46,7 +65,7 @@ impl Dom {
             doc: BaseDocument::new(document_config()),
             nodes: Vec::new(),
             handles: BTreeMap::new(),
-            click_target: None,
+            pending_event: None,
             resources: Self::index_resources(resources),
         }
     }
@@ -169,32 +188,32 @@ impl BlitzSession {
     /// Deliver a primary click to an element and drain VM work. Returns `false`
     /// if canceled. Node IDs are local to this document; reacquire them after restore.
     pub fn click(&mut self, target: NodeId) -> Result<bool, String> {
-        let accepted = self.dispatch_click(target)?;
+        let accepted = self.dispatch_user_event(UserEvent::Click, target)?;
         self.run_until_idle()?;
         Ok(accepted)
     }
 
-    fn dispatch_click(&mut self, target: NodeId) -> Result<bool, String> {
+    fn dispatch_user_event(&mut self, kind: UserEvent, target: NodeId) -> Result<bool, String> {
         {
             let mut dom = self.dom.borrow_mut();
             let node = dom
                 .doc
                 .get_node(target)
                 .filter(|node| node.element_data().is_some())
-                .ok_or("click target is not an element")?;
+                .ok_or_else(|| format!("{} target is not an element", kind.name()))?;
             let mut root = node;
             while let Some(parent) = root.parent.and_then(|id| dom.doc.get_node(id)) {
                 root = parent;
             }
             if root.id != dom.doc.root_node().id {
-                return Err("click target is detached".into());
+                return Err(format!("{} target is detached", kind.name()));
             }
-            dom.click_target = Some(target);
+            dom.pending_event = Some((kind, target));
         }
         let result = self
             .vm
-            .start_host_export("yield:dom", "dispatchClick", vec![]);
-        self.dom.borrow_mut().click_target = None;
+            .start_host_export("yield:dom", "dispatchUserEvent", vec![]);
+        self.dom.borrow_mut().pending_event = None;
         result
             .map(|value| value == Value::boolean(true))
             .map_err(|error| error.to_string())

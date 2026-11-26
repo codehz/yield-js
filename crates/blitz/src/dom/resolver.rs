@@ -8,6 +8,7 @@ use yield_vm::{JsError, JsResult, JsValue};
 use super::Dom;
 use super::document::{Document, DocumentSlots};
 use super::element::{Element, HTMLIFrameElement, alloc_element};
+use super::input::{HTMLInputElement, is_input};
 use super::node::{Node, NodeSlots};
 
 impl Dom {
@@ -59,6 +60,9 @@ impl Dom {
             let value = match &self.doc.get_node(id).expect("collected live ancestor").data {
                 NodeData::Element(element) if element.name.local == local_name!("iframe") => {
                     alloc_element(cx, HTMLIFrameElement)?.value(cx)
+                }
+                NodeData::Element(element) if is_input(element) => {
+                    alloc_element(cx, HTMLInputElement)?.value(cx)
                 }
                 NodeData::Element(_) => alloc_element(cx, Element)?.value(cx),
                 NodeData::Text(_) | NodeData::Comment { .. } => cx.alloc(Node)?.value(cx),

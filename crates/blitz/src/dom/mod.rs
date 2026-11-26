@@ -5,6 +5,7 @@
 
 mod document;
 mod element;
+mod input;
 mod module;
 mod node;
 mod resolver;
@@ -20,6 +21,7 @@ use yield_vm::{Instance, JsError, JsResult, JsValue};
 use self::node::NodeSlots;
 use super::Dom;
 
+pub(crate) use input::{is_text_input, write_input_value};
 pub use module::DomModule;
 pub(crate) use node::Node;
 

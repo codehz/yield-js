@@ -4,6 +4,11 @@ button {
   padding: 4px 8px;
 }
 
+input {
+  box-sizing: border-box;
+  width: 100%;
+}
+
 #root {
   width: 101px;
 }

@@ -59,6 +59,18 @@ impl Document {
 
     #[get(name = "activeElement")]
     fn active_element(cx: &mut ClassCx<'_, '_, Self>, this: This<Document>) -> JsResult<JsValue> {
+        let owner = bound_document(cx, &this)?;
+        let dom = Self::dom(cx.services());
+        // Blitz falls back to the root element for keyboard event targeting.
+        let focused = {
+            let dom = dom.borrow();
+            dom.doc
+                .get_focussed_node_id()
+                .filter(|&id| dom.doc.get_node(id).is_some_and(|node| node.is_focussed()))
+        };
+        if let Some(id) = focused {
+            return dom.borrow_mut().resolve_node(cx, owner, Some(id));
+        }
         Self::body(cx, this)
     }
 

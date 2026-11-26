@@ -29,6 +29,39 @@ impl Element {
         Ok(JsValue::string("http://www.w3.org/1999/xhtml"))
     }
 
+    #[method(name = "getAttribute")]
+    fn get_attribute(
+        cx: &mut ClassCx<'_, '_, Self>,
+        this: This<Element>,
+        name: JsValue,
+    ) -> JsResult<JsValue> {
+        let node_value = this.instance().value(cx);
+        let index = base_node_index(cx, &node_value)?;
+        let name = LocalName::from(cx.string(&name)?.to_string().to_ascii_lowercase());
+        let dom = Self::dom(cx.services()).borrow();
+        Ok(dom
+            .node(index)?
+            .attr(name)
+            .map_or_else(JsValue::null, JsValue::string))
+    }
+
+    #[method(name = "removeAttribute")]
+    fn remove_attribute(
+        cx: &mut ClassCx<'_, '_, Self>,
+        this: This<Element>,
+        name: JsValue,
+    ) -> JsResult<()> {
+        let node_value = this.instance().value(cx);
+        let index = base_node_index(cx, &node_value)?;
+        let name = LocalName::from(cx.string(&name)?.to_string().to_ascii_lowercase());
+        let mut dom = Self::dom(cx.services()).borrow_mut();
+        let id = dom.node(index)?.id;
+        dom.doc
+            .mutate()
+            .clear_attribute(id, QualName::new(None, ns!(), name));
+        Ok(())
+    }
+
     #[method(name = "setAttribute")]
     fn set_attribute(
         cx: &mut ClassCx<'_, '_, Self>,

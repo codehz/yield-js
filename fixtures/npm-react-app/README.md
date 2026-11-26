@@ -1,6 +1,6 @@
 # React + TSX 构建输入夹具
 
-对齐 [docs/design/build.md](../../docs/design/build.md) 与 [framework-acceptance.md](../../docs/design/framework-acceptance.md) 的验收输入。`src/blitz.jsx` 用于真实 React DOM 首屏和普通 CSS 导入验收；`src/index.tsx`、类型剥离和动态 sheet 不在本次验收范围内。
+对齐 [docs/design/build.md](../../docs/design/build.md) 与 [framework-acceptance.md](../../docs/design/framework-acceptance.md) 的验收输入。`src/blitz.jsx` 用于真实 React DOM 挂载、普通 CSS 导入、点击计数和受控文本输入验收；Blitz 演示不覆盖 `src/index.tsx`、类型剥离或动态 sheet。
 
 ## 覆盖点
 
@@ -15,6 +15,7 @@
 | 无 `exports` 包的字段回退规则 | `scheduler`（无 `exports`，按预设定义回退到 `main`/`index.js`，不猜测其他字段） |
 | CSS 副作用导入、模块去重、作者样式层叠与快照恢复 | `src/blitz-styles.mjs`、`src/styles.css`、`src/cascade.css` |
 | React DOM 自带 reconciler 的首屏入口 | `src/blitz.jsx` |
+| 原生文本编辑、React `onChange`、脚本清空与恢复后继续编辑 | `src/blitz.jsx` 的 Name 输入框、问候语和 Clear 按钮 |
 
 ## 约定
 
@@ -24,7 +25,7 @@
 - CJS 依赖（`scheduler` 生产包为 CJS）用于验收 CJS 静态可分析子集转换；动态 `require` 应在构建期报错，本夹具不含此类用法的成功场景。
 - 资源（CSS）不进入 VM 堆，由宿主从 Build 读取后自行消费。
 
-## Blitz 首屏入口
+## Blitz 交互演示
 
 `src/blitz.jsx` 使用 `react-dom/client` 的 `createRoot` 和 `react-dom` 的 `flushSync`。调用方从仓库根目录准备锁定依赖并验收：
 
@@ -33,4 +34,6 @@ npm ci --ignore-scripts --prefix fixtures/npm-react-app
 cargo test -p yield-blitz --test render
 ```
 
-验收检查 `#root > main > h1` 的文本为 `Hello from React DOM`，并确认二进制恢复前后 `#root` 宽度均为 137px、`head` 各有两个样式节点；缺少 `node_modules` 时测试失败并提示准备命令。
+验收检查 `#root > main > h1` 的文本、CSS 层叠，以及原生编辑是否经 React `onChange` 更新问候语。二进制快照恢复后可继续计数和编辑；Clear 按钮验证 React 状态能反向清空原生编辑器。缺少 `node_modules` 时测试失败并提示准备命令。
+
+运行 `cargo run -p yield-blitz` 打开窗口：点击计数按钮，再聚焦 Name 输入框并输入文字；问候语应随输入更新，点击 Clear 恢复 `Hello, guest!`。

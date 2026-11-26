@@ -9,8 +9,9 @@ use yield_vm::{Decode, Encode, Services};
 
 use super::Dom;
 use super::dom::DomModule;
+use super::dom::{is_text_input, write_input_value};
 
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
 
 /// The live tree belongs to the host; capture and restore use the current service.
 #[derive(Default)]
@@ -52,6 +53,7 @@ struct DomImage {
 struct NodeRecord {
     kind: NodeKind,
     children: Vec<u32>,
+    input_value: Option<String>,
 }
 
 enum NodeKind {
@@ -178,6 +180,11 @@ impl DomImage {
                 nodes.push(NodeRecord {
                     kind,
                     children: Vec::with_capacity(node.children.len()),
+                    input_value: node
+                        .element_data()
+                        .filter(|element| is_text_input(element))
+                        .and_then(|element| element.text_input_data())
+                        .map(|input| input.editor.text().to_string()),
                 });
                 stack.extend(
                     node.children
@@ -231,9 +238,15 @@ impl DomImage {
         let root = dom.doc.root_node().id;
         let mut ids = Vec::with_capacity(self.nodes.len());
         let mut child_lists = Vec::with_capacity(self.nodes.len());
+        let mut input_values = Vec::new();
         {
             let mut mutation = dom.doc.mutate();
-            for NodeRecord { kind, children } in self.nodes {
+            for NodeRecord {
+                kind,
+                children,
+                input_value,
+            } in self.nodes
+            {
                 let id = match kind {
                     NodeKind::Document => root,
                     NodeKind::Element(name, attrs) => mutation.create_element(
@@ -251,6 +264,9 @@ impl DomImage {
                 };
                 ids.push(id);
                 child_lists.push(children);
+                if let Some(value) = input_value {
+                    input_values.push((id, value));
+                }
             }
             // Build detached subtrees before connecting them to the document.
             let mut child_ids = Vec::new();
@@ -260,6 +276,11 @@ impl DomImage {
                     mutation.append_children(parent, &child_ids);
                     child_ids.clear();
                 }
+            }
+        }
+        for (id, value) in input_values {
+            if !write_input_value(&mut dom.doc, id, &value) {
+                return Err(CodecError::new("invalid DOM snapshot input value"));
             }
         }
         dom.nodes = self

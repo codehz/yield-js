@@ -9,13 +9,14 @@ use yield_vm::{HostStep, Instance, JsError, JsResult, JsValue, ModuleCx};
 use super::Dom;
 use super::document::{Document, DocumentSlots};
 use super::element::{Element, HTMLIFrameElement, alloc_element};
+use super::input::HTMLInputElement;
 use super::node::Node;
 use super::resolver::init_node;
 use crate::snapshot::DomState;
 
 #[host_module(
     name = "yield:dom",
-    classes = [Node, Document, Element, HTMLIFrameElement],
+    classes = [Node, Document, Element, HTMLIFrameElement, HTMLInputElement],
     services = [dom: Rc<RefCell<Dom>>],
 )]
 #[derive(Default, yield_vm::Encode, yield_vm::Decode)]
@@ -47,17 +48,22 @@ impl DomModule {
         alloc_element(cx, HTMLIFrameElement)
     }
 
-    #[function(name = "dispatchClick")]
-    async fn dispatch_click(cx: &mut ModuleCx<'_, Self>) -> JsResult<HostStep> {
+    #[constructor(name = "HTMLInputElement", class = HTMLInputElement)]
+    fn construct_input(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<HTMLInputElement>> {
+        alloc_element(cx, HTMLInputElement)
+    }
+
+    #[function(name = "dispatchUserEvent")]
+    async fn dispatch_user_event(cx: &mut ModuleCx<'_, Self>) -> JsResult<HostStep> {
         let document = cx.state_slot(Self::SLOT_DOCUMENT)?;
-        let target = {
+        let (kind, target) = {
             let mut dom = Self::dom(cx.services()).borrow_mut();
-            let id = dom.click_target.take().ok_or_else(|| {
-                JsError::new::<TypeError>("dispatchClick requires input from the host")
+            let (kind, id) = dom.pending_event.take().ok_or_else(|| {
+                JsError::new::<TypeError>("dispatchUserEvent requires input from the host")
             })?;
-            dom.resolve_node(cx, document, Some(id))?
+            (kind, dom.resolve_node(cx, document, Some(id))?)
         };
-        let event = cx.event("click", true, true)?;
+        let event = cx.event(kind.name(), true, kind.cancelable())?;
         let accepted = cx.dispatch_event(target, event).await?;
         Ok(HostStep::Return(accepted))
     }

@@ -1,7 +1,7 @@
 use blitz_dom::{Document, NodeData, NodeId};
 use blitz_traits::events::{
-    BlitzPointerEvent, BlitzPointerId, DomEvent, DomEventData, EventDispatchSource, PointerCoords,
-    UiEvent,
+    BlitzImeEvent, BlitzPointerEvent, BlitzPointerId, DomEvent, DomEventData, EventDispatchSource,
+    PointerCoords, UiEvent,
 };
 use yield_blitz::{BlitzSession, compile_fixture, compile_module, render_module};
 use yield_vm::{Build, BuildResource, RestoreOptions, Snapshot, SnapshotValidation, Value};
@@ -113,8 +113,8 @@ fn mounts_react_and_resumes_the_click_counter() -> Result<(), String> {
     };
     let main = doc.get_node(*main).unwrap();
     assert_eq!(&*main.element_data().unwrap().name.local, "main");
-    let [heading, counter] = main.children.as_slice() else {
-        panic!("expected a heading and counter in main")
+    let [heading, counter, _] = main.children.as_slice() else {
+        panic!("expected a heading, counter and name editor in main")
     };
     let heading = doc.get_node(*heading).unwrap();
     assert_eq!(&*heading.element_data().unwrap().name.local, "h1");
@@ -141,6 +141,119 @@ fn mounts_react_and_resumes_the_click_counter() -> Result<(), String> {
     assert!(restored.click(counter)?);
     assert_eq!(text(&restored, counter), "Clicks: 2");
     Ok(())
+}
+
+#[test]
+fn edits_and_clears_the_controlled_react_input_after_restore() -> Result<(), String> {
+    let build = compile_fixture()?;
+    let mut session = BlitzSession::new(build.clone())?;
+    session.run_until_idle()?;
+    assert_greeting(&session, "Hello, guest!");
+
+    commit_text(&mut session, "小明");
+    assert_name(&session, "小明");
+    assert_greeting(&session, "Hello, 小明!");
+
+    let bytes = session.snapshot(&[])?.to_bytes()?;
+    drop(session);
+    let mut session = BlitzSession::restore(
+        Snapshot::from_bytes(&bytes)?,
+        build,
+        RestoreOptions {
+            validation: SnapshotValidation::Full,
+            ..Default::default()
+        },
+    )?;
+    assert_name(&session, "小明");
+    assert_greeting(&session, "Hello, 小明!");
+
+    commit_text(&mut session, "🙂");
+    assert_name(&session, "小明🙂");
+    assert_greeting(&session, "Hello, 小明🙂!");
+
+    let clear = session.document().get_element_by_id("clear-name").unwrap();
+    deliver_blitz_click(&mut session, clear);
+    assert_name(&session, "");
+    assert_greeting(&session, "Hello, guest!");
+    commit_text(&mut session, "Ada");
+    assert_name(&session, "Ada");
+    assert_greeting(&session, "Hello, Ada!");
+    Ok(())
+}
+
+#[test]
+fn restores_text_edited_independently_of_the_value_attribute() -> Result<(), String> {
+    let build = compile_module(
+        r#"
+        const input = document.createElement('input');
+        input.setAttribute('id', 'name');
+        input.defaultValue = 'seed';
+        document.getElementById('root').appendChild(input);
+        let edited = false;
+        input.addEventListener('input', event => {
+            if (document.activeElement !== input || event.target !== input ||
+                !event.bubbles || !event.isTrusted || event.cancelable) {
+                throw new Error('invalid native input event');
+            }
+            edited = true;
+        });
+        export function check() {
+            if (!edited || !(input instanceof HTMLInputElement) || input.defaultValue !== 'seed' ||
+                input.getAttribute('value') !== 'seed' || input.value !== 'seed!') {
+                throw new Error('live text must not overwrite the default');
+            }
+        }
+    "#,
+    )?;
+    let mut session = BlitzSession::new(build.clone())?;
+    commit_text(&mut session, "!");
+    session.start("check", vec![])?;
+    let snapshot = session.snapshot(&[])?;
+    drop(session);
+
+    let mut restored = BlitzSession::restore(snapshot, build, Default::default())?;
+    restored.start("check", vec![])?;
+    Ok(())
+}
+
+fn commit_text(session: &mut BlitzSession, text: &str) {
+    session.resolve_layout(0.0);
+    let target = session.document().get_element_by_id("name").unwrap();
+    let mut doc = session.inner_mut();
+    doc.set_focus_to(target);
+    assert_eq!(doc.get_focussed_node_id(), Some(target));
+    doc.with_text_input(target, |mut driver| driver.move_to_text_end());
+    drop(doc);
+    // Let Blitz perform the edit and generate its own input event.
+    session.handle_ui_event(UiEvent::Ime(BlitzImeEvent::Commit(text.into())));
+}
+
+fn assert_name(session: &BlitzSession, expected: &str) {
+    let doc = session.document();
+    let input = doc
+        .get_node(doc.get_element_by_id("name").unwrap())
+        .unwrap();
+    assert_eq!(
+        input
+            .element_data()
+            .unwrap()
+            .text_input_data()
+            .unwrap()
+            .editor
+            .text()
+            .to_string(),
+        expected
+    );
+}
+
+fn assert_greeting(session: &BlitzSession, expected: &str) {
+    let doc = session.document();
+    assert_eq!(
+        doc.get_node(doc.get_element_by_id("greeting").unwrap())
+            .unwrap()
+            .text_content(),
+        expected
+    );
 }
 
 // Bypass winit hit testing, but use the same document event driver as the window.
