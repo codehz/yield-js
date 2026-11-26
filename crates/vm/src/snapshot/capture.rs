@@ -37,7 +37,7 @@ impl VmCore {
         host: &Host<P>,
         roots: &[Value],
     ) -> Result<Snapshot, VmError> {
-        self.capture_image(host, roots, |_| {}, |_| {})
+        self.capture_image(host, roots, &[], |_| {}, |_| {})
     }
 
     /// Capture through the same path as `snapshot`, timing its phases.
@@ -55,6 +55,7 @@ impl VmCore {
         let snapshot = self.capture_image(
             host,
             roots,
+            &[],
             |field| {
                 let now = Instant::now();
                 *field(&mut profile) += now.duration_since(last);
@@ -72,6 +73,7 @@ impl VmCore {
         &self,
         host: &Host<P>,
         roots: &[Value],
+        groups: &[Vec<crate::ObjectId>],
         mut checkpoint: impl FnMut(fn(&mut crate::perf::Capture) -> &mut std::time::Duration),
         prepare: impl FnOnce(&std::collections::BTreeSet<crate::ObjectId>),
     ) -> Result<Snapshot, VmError> {
@@ -87,7 +89,7 @@ impl VmCore {
             ));
         }
 
-        let live = self.trace_roots(roots)?;
+        let live = self.trace_roots(roots, groups)?;
         if self
             .heap
             .resolutions

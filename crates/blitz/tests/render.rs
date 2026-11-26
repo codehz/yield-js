@@ -430,16 +430,26 @@ fn collects_detached_dom_after_the_last_root_is_released() -> Result<(), String>
     let mut session = BlitzSession::new(build.clone())?;
     session.start("attach", vec![])?;
     session.start("detach", vec![])?;
+    // Capture before GC as well as after it: snapshot tracing must preserve
+    // the detached component without relying on a preceding collection.
+    let before_gc = session.snapshot(&[])?;
     session.collect_garbage(&[])?;
-    let snapshot = session.snapshot(&[])?;
-    let mut restored = BlitzSession::restore(
-        snapshot,
-        build,
-        RestoreOptions {
-            validation: SnapshotValidation::Full,
-            ..Default::default()
-        },
-    )?;
+    let after_gc = session.snapshot(&[])?;
+    let restore = |snapshot| {
+        BlitzSession::restore(
+            snapshot,
+            build.clone(),
+            RestoreOptions {
+                validation: SnapshotValidation::Full,
+                ..Default::default()
+            },
+        )
+    };
+    assert_eq!(
+        restore(before_gc)?.start("verify", vec![])?,
+        Value::boolean(true)
+    );
+    let mut restored = restore(after_gc)?;
     assert_eq!(restored.start("verify", vec![])?, Value::boolean(true));
     let branch = restored.document().get_element_by_id("branch").unwrap();
     let leaf = restored.document().get_node(branch).unwrap().children[0];
@@ -850,6 +860,49 @@ fn dispatches_click_after_snapshot_restore() -> Result<(), String> {
     assert!(!session.click(target)?);
     assert!(session.click(target)?);
     assert_eq!(session.start("count", vec![])?, Value::number(1.0));
+    Ok(())
+}
+
+#[test]
+fn click_keeps_its_original_path_when_capture_moves_target() -> Result<(), String> {
+    let build = compile_module(
+        r#"
+        const root = document.getElementById('root');
+        const oldParent = document.createElement('div');
+        const newParent = document.createElement('div');
+        const button = document.createElement('button');
+        button.setAttribute('id', 'moving-button');
+        oldParent.appendChild(button);
+        root.appendChild(oldParent);
+        root.appendChild(newParent);
+
+        let path = '';
+        root.addEventListener('click', () => {
+            path += 'capture ';
+            newParent.appendChild(button);
+        }, { capture: true, once: true });
+        oldParent.addEventListener('click', () => { path += 'old '; });
+        newParent.addEventListener('click', () => { path += 'new '; });
+        button.addEventListener('click', () => {
+            path += button.parentNode === newParent ? 'moved ' : 'not moved ';
+        });
+        export function takePath() {
+            const result = path;
+            path = '';
+            return result;
+        }
+        "#,
+    )?;
+    let mut session = BlitzSession::new(build)?;
+    let target = session
+        .document()
+        .get_element_by_id("moving-button")
+        .unwrap();
+    for expected in ["capture moved old ", "moved new "] {
+        assert!(session.click(target)?);
+        let path = session.start("takePath", vec![])?.into_string().unwrap();
+        assert_eq!(path.to_utf8().unwrap(), expected);
+    }
     Ok(())
 }
 

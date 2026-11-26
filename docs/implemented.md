@@ -46,9 +46,9 @@
 - C 风格 `for` 的 `using` / `await using` 头在整个循环退出时释放；`continue` 不结束头部资源的生命周期。`for…of` 和 `for await…of` 的单名资源头每轮先登记、再初始化绑定和执行正文，当轮清理先于迭代器关闭。迭代方式独立于释放 hint，`for…in` 不允许资源头。模块顶层 `using` 在本模块求值返回前完成清理，不在实例化、恢复或 VM 销毁时运行。
 - `SlotKind::{Transient, Persistent}`；`ResumeEntry` 保存 `fulfill_pc`、`reject_pc`、结果槽和升序 `saved_slots`。
 - `yield-blitz` 通过 `BlitzSession` 持有 VM 与文档；版本化 DOM payload 随 `yield:dom` 模块状态快照，恢复时直接重建 Blitz 节点树、脱离子树及包装索引，不重跑模块初始化。快照保留 JS 节点、闭包、expando 与监听器身份，恢复后脚本可继续更新树；`render_module` / `render_fixture` 仍提供执行后移交文档的一次性入口。React TodoMVC 夹具使用 `createRoot`、受控输入与 keyed 列表，由 Blitz shell/Vello 显示。
-- `textContent` 替换子节点时即时回收从未包装的旧子树。`BlitzSession::collect_garbage(roots)` 回收其余不可达的脱离 DOM 树。挂载树和仍有任一可达包装对象的脱离树保留已有包装。快照使用同一可达性规则，不清扫运行中的会话。
+- 查询只为返回的节点创建包装，不包装祖先。`textContent` 替换子节点时即时回收未包装的旧叶子；旧分支与已包装的叶子脱离后交给 `BlitzSession::collect_garbage(roots)`。挂载树和仍有任一可达包装对象的脱离树保留已有包装。快照使用同一可达性规则，不清扫运行中的会话。
 - Blitz 为显式 `.css` 导入注册文本加载器：普通样式表保留原始字节，无脚本导出；`.module.css` 以规范化逻辑 ID 改写局部类名，默认导出无原型映射，支持同文件和全局 `composes`。两者均由 ESM 调用 `yield:dom.insertCss`；宿主按精确 URI 读取构建字节，将 UTF-8 文本作为 `head` 末尾的作者样式节点插入。恢复重建已保存的样式节点，不重新执行导入。
-- `BlitzSession::click` 和原生窗口的主键点击共用 VM 的 `EventTarget` 派发：向当前文档的元素发送可信、可冒泡、可取消的 `click`；取消会阻止 Blitz 默认动作。节点的事件父级用 VM 托管槽保存，随 `appendChild`、`insertBefore` 和 `removeChild` 移动或脱离更新。快照不重放原生输入；恢复后应从新文档取得目标，再投递下一次点击。
+- `BlitzSession::click` 和原生窗口的主键点击共用 VM 的 `EventTarget` 派发：向当前文档的元素发送可信、可冒泡、可取消的 `click`；取消会阻止 Blitz 默认动作。可信与脚本派发均从原生父链求得完整路径，并在调用任何监听器前固定路径。本轮监听器中的树变更只影响后续派发。快照不重放原生输入；恢复后应从新文档取得目标，再投递下一次点击。
 - 原生单行文本编辑完成后，Blitz 向 `HTMLInputElement` 派发可信、可冒泡、不可取消的 `input`。`value` 读写当前编辑值，`defaultValue` 反映默认值属性；React 用原型访问器跟踪当前值，通过 `onChange` 更新状态，并能反向写入原生编辑器。快照恢复已提交文本与 React 状态，重新聚焦后可继续输入。
 - HTML 命名空间内，现行 HTML 标准中有专用 DOM 接口的元素使用其对应原型；同接口的标签（如 `h1`–`h6`、`td` 与 `th`）共用原型但保留各自的标签名。`HTMLAudioElement` 和 `HTMLVideoElement` 继承 `HTMLMediaElement`。已绑定的原型属性反射到原生 DOM 属性。复选框的 `checked` 与绘制共用当前值，`defaultChecked` 反映 checked 属性；用户点击在监听器执行前切换当前值，取消则还原。快照保留复选框与默认值独立的当前值和 dirty 状态，包括脱离文档的节点。
 - Blitz 接入 VM 的可取消定时器唤醒，让 React scheduler 的 `setTimeout` 回退在事件轮次后继续执行；窗口通过文档轮询接收延迟唤醒，快照恢复后重新登记未完成的定时器。

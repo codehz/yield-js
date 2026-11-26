@@ -454,14 +454,14 @@ impl<C: HostClass> std::ops::DerefMut for ClassCx<'_, '_, C> {
     }
 }
 
-#[doc(hidden)]
+/// Runs a class callback with the declaring class's typed services.
 pub fn with_class<'a, C: HostClass, R>(
     call: &mut CallCx<'a>,
     run: impl FnOnce(&mut ClassCx<'_, 'a, C>) -> JsResult<R>,
 ) -> JsResult<R> {
     let services = call
-        .bindings
-        .class_callback_services::<C>(call.owner)
+        .class_owner
+        .and_then(|owner| call.bindings.class_callback_services::<C>(owner))
         .ok_or_else(|| JsError::fault("class callback owner mismatch"))?;
     run(&mut ClassCx { call, services })
 }
@@ -520,16 +520,62 @@ pub struct CallCx<'a> {
     pub(crate) vm: &'a mut VmCore,
     pub(crate) roots: &'a ActiveRoots<'a>,
     pub(crate) bindings: &'a Bindings,
-    pub(crate) owner: NativeTarget,
+    pub(crate) class_owner: Option<ClassId>,
     pub(crate) epoch: u32,
     pub(crate) call: u64,
     pub(crate) args: &'a [JsValue],
     pub(crate) this: JsValue,
     pub(crate) construct: bool,
     pub(crate) allocation_prototype: Option<(ClassId, ObjectId)>,
-    pub(crate) initialize_class: &'a InitializeClass<'a>,
+    pub(crate) initialize_class: Option<&'a InitializeClass<'a>>,
     // Argument coercion can execute guest code and collect while the callback is active.
     pub(crate) handles: RefCell<HandleRoots>,
+}
+
+impl VmCore {
+    pub(crate) fn invoke_event_parent(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        bindings: &Bindings,
+        owner: ClassId,
+        call: EventParentFn,
+        receiver: ObjectId,
+    ) -> Result<crate::runtime::Invocation, crate::VmError> {
+        use crate::{VmError, runtime::Invocation};
+
+        let call_id = self.next_host_call;
+        self.next_host_call = call_id.checked_add(1).unwrap_or(1);
+        let epoch = self.epoch;
+        let receiver = JsValue::handle(Value::object(receiver), epoch, call_id);
+        let mut cx = CallCx {
+            vm: self,
+            roots,
+            bindings,
+            class_owner: Some(owner),
+            epoch,
+            call: call_id,
+            args: &[],
+            this: receiver.clone(),
+            construct: false,
+            allocation_prototype: None,
+            initialize_class: None,
+            handles: Default::default(),
+        };
+        let (value, wrap): (JsValue, fn(Value) -> Invocation) = match call(&mut cx, receiver) {
+            Ok(value) => (value, Invocation::Value),
+            Err(JsError::Throw(value)) => (value, Invocation::Thrown),
+            Err(JsError::Error(error)) => {
+                return cx
+                    .vm
+                    .alloc_intrinsic_message(cx.roots, error.class, Some(error.message))
+                    .map(Invocation::Thrown);
+            }
+            Err(JsError::Fault(fault)) => return Err(VmError::HostFault(fault.0)),
+        };
+        cx.into_value(value)
+            .map(wrap)
+            .map_err(|error| VmError::Host(error.0))
+    }
 }
 
 impl<'a> CallCx<'a> {
@@ -699,6 +745,9 @@ impl<'a> CallCx<'a> {
 
     #[doc(hidden)]
     pub fn __spawn(&self, first: HostStep) -> JsResult<HostStep> {
+        if self.initialize_class.is_none() {
+            return Err(JsError::fault("event parent callbacks cannot suspend"));
+        }
         let request = match first {
             HostStep::Suspend(request) => request,
             HostStep::Return(value) => {
@@ -732,6 +781,9 @@ impl<'a> CallCx<'a> {
     }
 
     fn suspend(&self, action: Action, saved: Vec<JsValue>, resume: Resume) -> JsResult<HostStep> {
+        if self.initialize_class.is_none() {
+            return Err(JsError::fault("event parent callbacks cannot suspend"));
+        }
         let saved = saved
             .into_iter()
             .map(|value| self.unpack(value))
@@ -823,11 +875,16 @@ impl<'a> CallCx<'a> {
         name: &str,
         args: &[JsValue],
     ) -> JsResult<Value> {
+        // Intrinsic initialization can invoke guest conversions/getters, even
+        // when reached indirectly through alloc_with_super.
+        let initialize_class = self.initialize_class.ok_or_else(|| {
+            JsError::fault("event parent callbacks cannot initialize intrinsic classes")
+        })?;
         for arg in args {
             self.check_value(arg)?;
         }
         let live = (&self.handles, self.args);
-        let result = (self.initialize_class)(
+        let result = initialize_class(
             self.vm,
             &self.roots.with(&live),
             class,

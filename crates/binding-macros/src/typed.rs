@@ -1343,6 +1343,7 @@ pub(super) fn host_class(args: TokenStream, item: TokenStream) -> Result<TokenSt
                 "prototype_name",
                 "event_target",
                 "event_parent",
+                "event_parent_fn",
             ],
         )?;
         Ok((opts, fields.unwrap_or_default()))
@@ -1394,6 +1395,20 @@ pub(super) fn host_class(args: TokenStream, item: TokenStream) -> Result<TokenSt
         }
         None => false,
     };
+    let event_parent_fn = if let Some(meta) = opts.get("event_parent_fn") {
+        if opts.contains_key("event_parent") {
+            return Err(Error::new_spanned(
+                meta,
+                "`event_parent_fn` and `event_parent` are mutually exclusive",
+            ));
+        }
+        let callback = path(meta)?;
+        Some(quote! {
+            const EVENT_PARENT_FN: Option<::yield_vm::binding::EventParentFn> = Some(#callback);
+        })
+    } else {
+        None
+    };
     let event_parent = if let Some(meta) = opts.get("event_parent") {
         let field = path(meta)?;
         let field = field
@@ -1410,6 +1425,7 @@ pub(super) fn host_class(args: TokenStream, item: TokenStream) -> Result<TokenSt
     } else {
         None
     };
+    let event_target = event_target || event_parent_fn.is_some();
     let event_target = (event_target || event_parent.is_some()).then(|| {
         quote!(
             const EVENT_TARGET: bool = true;
@@ -1433,6 +1449,7 @@ pub(super) fn host_class(args: TokenStream, item: TokenStream) -> Result<TokenSt
             #prototype_name
             #event_target
             #event_parent
+            #event_parent_fn
             #tables
             #codec
         }

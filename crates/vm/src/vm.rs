@@ -472,7 +472,18 @@ impl<P: PlatformServices> Vm<P> {
     /// encounters a missing object, continuation, or symbol. A failed
     /// collection leaves the VM unchanged.
     pub fn collect_garbage(&mut self, roots: &[Value]) -> Result<usize, VmError> {
-        self.core.collect_garbage(roots)
+        self.collect_garbage_with_groups(roots, &[])
+    }
+
+    /// Like [`Self::collect_garbage`], but a live member of a group keeps every
+    /// member live. Groups are not roots and are used only for this collection.
+    /// All IDs must exist in this VM and no ID may belong to multiple groups.
+    pub fn collect_garbage_with_groups(
+        &mut self,
+        roots: &[Value],
+        groups: &[Vec<crate::ObjectId>],
+    ) -> Result<usize, VmError> {
+        self.core.collect_garbage_with_groups(roots, groups)
     }
 
     /// Whether the VM still contains the host instance with this local identity.
@@ -515,7 +526,20 @@ impl<P: PlatformServices> Vm<P> {
         roots: &[Value],
         prepare: impl FnOnce(&std::collections::BTreeSet<crate::ObjectId>),
     ) -> Result<Snapshot, VmError> {
-        self.core.capture_image(&self.host, roots, |_| {}, prepare)
+        self.snapshot_with_live_objects_and_groups(roots, &[], prepare)
+    }
+
+    /// Like [`Self::snapshot_with_live_objects`], with conditional groups as in
+    /// [`Self::collect_garbage_with_groups`]. The groups are not serialized.
+    #[doc(hidden)]
+    pub fn snapshot_with_live_objects_and_groups(
+        &self,
+        roots: &[Value],
+        groups: &[Vec<crate::ObjectId>],
+        prepare: impl FnOnce(&std::collections::BTreeSet<crate::ObjectId>),
+    ) -> Result<Snapshot, VmError> {
+        self.core
+            .capture_image(&self.host, roots, groups, |_| {}, prepare)
     }
 
     /// Monotonic allocation totals for host GC scheduling, read between VM
@@ -785,14 +809,18 @@ impl VmCore {
                 vm: self,
                 roots,
                 bindings,
-                owner,
+                class_owner: match owner {
+                    NativeTarget::Method(id) => Some(id.class as usize),
+                    NativeTarget::Accessor { class, .. } => Some(class as usize),
+                    NativeTarget::Export(_) => None,
+                },
                 epoch,
                 call: call_id,
                 args: &stage_args,
                 this: wrap(receiver.clone()),
                 construct: construction.is_some() && matches!(entry, HostEntry::Call(_)),
                 allocation_prototype,
-                initialize_class: &initialize_class,
+                initialize_class: Some(&initialize_class),
                 handles: Default::default(),
             };
             let (cx, step) = match entry {

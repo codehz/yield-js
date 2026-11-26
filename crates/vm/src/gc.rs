@@ -3,6 +3,7 @@
 //! Tracing is read-only; sweeping starts only after all reachable IDs have
 //! been validated. Unreachable IDs are never reused within the same VM.
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::error::VmError;
@@ -153,25 +154,17 @@ trace_tuple!(A a, B b, C c);
 trace_tuple!(A a, B b, C c, D d);
 
 impl VmCore {
-    /// Collects unreachable heap objects, returning the number removed.
-    ///
-    /// Call only between VM calls, after draining microtasks. No microtasks
-    /// are run by this method. Pass every same-VM [`Value`] you intend to use
-    /// later that is not otherwise reachable from the VM, including ordinary
-    /// symbols. The list may be empty or contain duplicates. Raw IDs do not
-    /// identify their VM of origin, so foreign IDs may alias local values.
-    /// This does not extend the lifetime of temporary host binding handles.
-    ///
-    /// Returns [`VmError::InvalidState`] if microtasks are queued or tracing
-    /// encounters a missing object, continuation, or symbol. A failed
-    /// collection leaves the VM unchanged.
-    pub fn collect_garbage(&mut self, roots: &[Value]) -> Result<usize, VmError> {
+    pub(crate) fn collect_garbage_with_groups(
+        &mut self,
+        roots: &[Value],
+        groups: &[Vec<ObjectId>],
+    ) -> Result<usize, VmError> {
         if !self.microtasks.is_empty() {
             return Err(VmError::InvalidState(
                 "garbage collection requires a drained microtask queue".to_owned(),
             ));
         }
-        self.collect_with_roots(|tracer| roots.trace(tracer), None)
+        self.collect_with_roots(|tracer| roots.trace(tracer), None, groups)
     }
 
     /// Monotonic allocation totals for host GC scheduling, read between VM
@@ -190,12 +183,13 @@ impl VmCore {
     ) -> Result<usize, VmError> {
         use crate::GcRoots as _;
 
+        let Some(roots) = host.platform().gc_roots() else {
+            return Ok(0);
+        };
+
         self.collect_with_roots(
             |tracer| {
                 let mut status = Ok(());
-                let Some(roots) = host.platform().gc_roots() else {
-                    return Ok(());
-                };
                 roots.visit(&mut |value| {
                     if status.is_ok() {
                         status = tracer.mark_value(value);
@@ -204,6 +198,7 @@ impl VmCore {
                 status
             },
             Some(active),
+            &[],
         )
     }
 
@@ -211,8 +206,9 @@ impl VmCore {
         &mut self,
         trace_external: impl FnOnce(&mut Tracer<'_>) -> Result<(), VmError>,
         active: Option<&ActiveRoots<'_>>,
+        groups: &[Vec<ObjectId>],
     ) -> Result<usize, VmError> {
-        let live = self.trace_with_roots(trace_external, active)?;
+        let live = self.trace_with_roots(trace_external, active, groups)?;
         for id in &live.symbols {
             if !self.heap.symbols.contains_key(id) {
                 return Err(VmError::InvalidState(format!(
@@ -232,16 +228,26 @@ impl VmCore {
         Ok(removed)
     }
 
-    pub(crate) fn trace_roots(&self, roots: &[Value]) -> Result<LiveSet, VmError> {
-        self.trace_with_roots(|tracer| roots.trace(tracer), None)
+    pub(crate) fn trace_roots(
+        &self,
+        roots: &[Value],
+        groups: &[Vec<ObjectId>],
+    ) -> Result<LiveSet, VmError> {
+        self.trace_with_roots(|tracer| roots.trace(tracer), None, groups)
     }
 
     fn trace_with_roots(
         &self,
         trace_external: impl FnOnce(&mut Tracer<'_>) -> Result<(), VmError>,
         active: Option<&ActiveRoots<'_>>,
+        groups: &[Vec<ObjectId>],
     ) -> Result<LiveSet, VmError> {
-        let mut tracer = Tracer::new(&self.heap, &self.continuations, &self.host_instances);
+        let mut tracer = Tracer::new(
+            &self.heap,
+            &self.continuations,
+            &self.host_instances,
+            groups,
+        )?;
         trace_external(&mut tracer)?;
         if let Some(active) = active {
             active.trace(&mut tracer)?;
@@ -366,6 +372,8 @@ pub(crate) struct Tracer<'a> {
     heap: &'a Heap,
     continuations: &'a BTreeMap<ContinuationId, Continuation>,
     host_instances: &'a BTreeMap<ObjectId, HostInstance>,
+    groups: &'a [Vec<ObjectId>],
+    group_index: BTreeMap<ObjectId, usize>,
     live: LiveSet,
     weak_maps: Vec<&'a BTreeMap<WeakKey, Value>>,
     object_queue: VecDeque<(ObjectId, &'a Object)>,
@@ -378,17 +386,39 @@ impl<'a> Tracer<'a> {
         heap: &'a Heap,
         continuations: &'a BTreeMap<ContinuationId, Continuation>,
         host_instances: &'a BTreeMap<ObjectId, HostInstance>,
-    ) -> Self {
-        Self {
+        groups: &'a [Vec<ObjectId>],
+    ) -> Result<Self, VmError> {
+        let mut group_index = BTreeMap::new();
+        for (index, group) in groups.iter().enumerate() {
+            for &id in group {
+                match group_index.entry(id) {
+                    Entry::Occupied(entry) => {
+                        if *entry.get() != index {
+                            return Err(VmError::InvalidState(format!(
+                                "object {id} belongs to multiple host groups"
+                            )));
+                        }
+                        continue;
+                    }
+                    Entry::Vacant(entry) => entry.insert(index),
+                };
+                heap.get(id).map_err(|_| {
+                    VmError::InvalidState(format!("host group references missing object {id}"))
+                })?;
+            }
+        }
+        Ok(Self {
             heap,
             continuations,
             host_instances,
+            groups,
+            group_index,
             live: LiveSet::default(),
             weak_maps: Vec::new(),
             object_queue: VecDeque::new(),
             continuation_queue: VecDeque::new(),
             edges: Vec::new(),
-        }
+        })
     }
 
     fn mark_value(&mut self, value: &Value) -> Result<(), VmError> {
@@ -481,6 +511,15 @@ impl<'a> Tracer<'a> {
     }
 
     fn walk_object(&mut self, id: ObjectId, object: &'a Object) -> Result<(), VmError> {
+        if let Some(&index) = self.group_index.get(&id) {
+            let group = &self.groups[index];
+            // Removing the first entry records that this group was expanded.
+            if group.len() > 1 && self.group_index.remove(&group[0]).is_some() {
+                for &member in group {
+                    self.mark_object(member)?;
+                }
+            }
+        }
         if let Object::WeakMap { entries, .. } = object {
             self.weak_maps.push(entries);
         }
@@ -544,5 +583,152 @@ impl<'a> Tracer<'a> {
             self.mark_value(value)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bytecode::{Build, Function, Instr, Slot, SourceModule};
+    use crate::heap::PlainObject;
+    use crate::{Host, Vm, VmOptions};
+
+    fn empty_vm() -> Vm {
+        let initializer = |func_id| Function {
+            func_id,
+            name: format!("init{func_id}"),
+            initial_name: String::new(),
+            is_async: false,
+            is_arrow: false,
+            is_method: false,
+            is_generator: false,
+            length: 0,
+            params: vec![],
+            rest_param: None,
+            this_param: None,
+            new_target_param: None,
+            home_param: None,
+            arguments_param: None,
+            transient_slots: 1,
+            persistent_slots: 0,
+            code: vec![
+                Instr::Undefined {
+                    dst: Slot::transient(0),
+                },
+                Instr::Return {
+                    src: Slot::transient(0),
+                },
+            ],
+            resumes: vec![],
+            generator_start: None,
+            generator_resumes: vec![],
+            handlers: vec![],
+            module: Some(0),
+            stack_sites: vec![],
+        };
+        let mut build = Build::new(
+            vec![],
+            vec![],
+            BTreeMap::new(),
+            vec![initializer(0), initializer(1)],
+            vec![SourceModule {
+                id: "entry".to_owned(),
+                declaration: 0,
+                evaluation: 1,
+                dependencies: vec![],
+                exports: BTreeMap::new(),
+            }],
+            0,
+            None,
+        );
+        build.finalize();
+        Vm::new(build, Host::default(), VmOptions::default()).unwrap()
+    }
+
+    #[test]
+    fn host_groups_are_not_roots() {
+        let mut vm = empty_vm();
+        let a = vm.core.heap.alloc_plain();
+        let b = vm.core.heap.alloc_plain();
+
+        vm.collect_garbage_with_groups(&[], &[vec![], vec![a, b]])
+            .unwrap();
+        assert!(vm.core.heap.get(a).is_err());
+        assert!(vm.core.heap.get(b).is_err());
+    }
+
+    #[test]
+    fn host_groups_close_over_weak_map_ephemerons() {
+        let mut vm = empty_vm();
+        let heap = &mut vm.core.heap;
+        let key = heap.alloc_plain();
+        let a = heap.alloc_plain();
+        let b = heap.alloc_plain();
+        let c = heap.alloc_plain();
+        let d = heap.alloc_plain();
+        let mut weak_map = |key, value| {
+            heap.alloc(Object::WeakMap {
+                object: PlainObject::new(None),
+                entries: BTreeMap::from([(WeakKey::Object(key), Value::object(value))]),
+            })
+        };
+        let first = weak_map(key, a);
+        let second = weak_map(b, c);
+        // Put the second map first so it must be revisited after A expands.
+        let roots = [second, first, key].map(Value::object);
+        let groups = [vec![b, a], vec![d, c]];
+
+        let mut prepared = false;
+        vm.snapshot_with_live_objects_and_groups(&roots, &groups, |live| {
+            assert!([a, b, c, d].iter().all(|id| live.contains(id)));
+            prepared = true;
+        })
+        .unwrap();
+        assert!(prepared);
+
+        vm.collect_garbage_with_groups(&roots, &groups).unwrap();
+        assert!(
+            [a, b, c, d]
+                .into_iter()
+                .all(|id| vm.core.heap.get(id).is_ok())
+        );
+
+        vm.collect_garbage(&roots).unwrap();
+        assert!(vm.core.heap.get(a).is_ok());
+        assert!(
+            [b, c, d]
+                .into_iter()
+                .all(|id| vm.core.heap.get(id).is_err())
+        );
+    }
+
+    #[test]
+    fn host_groups_invalid_input_leaves_heap_unswept() {
+        let mut vm = empty_vm();
+        let a = vm.core.heap.alloc_plain();
+        let b = vm.core.heap.alloc_plain();
+        for groups in [[vec![a], vec![ObjectId::MAX]], [vec![a], vec![a, b]]] {
+            assert!(matches!(
+                vm.collect_garbage_with_groups(&[], &groups),
+                Err(VmError::InvalidState(_))
+            ));
+            assert!(vm.core.heap.get(a).is_ok());
+            assert!(vm.core.heap.get(b).is_ok());
+        }
+    }
+
+    #[test]
+    fn host_groups_active_gc_requires_root_service() {
+        let mut vm = empty_vm();
+        let object = vm.core.heap.alloc_plain();
+        let removed = vm
+            .core
+            .collect_active(
+                &Host::<crate::host::Platform>::default(),
+                &ActiveRoots::EMPTY,
+            )
+            .unwrap();
+        assert_eq!(removed, 0);
+        assert!(vm.core.heap.get(object).is_ok());
     }
 }

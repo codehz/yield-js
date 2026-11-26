@@ -304,10 +304,13 @@ impl BlitzSession {
     /// Capture the VM and DOM state together.
     pub fn snapshot(&self, roots: &[Value]) -> Result<Snapshot, String> {
         let dom = self.dom.borrow();
-        let result = self.vm.snapshot_with_live_objects(roots, |live| {
-            dom.snapshot_image
-                .replace(Some(snapshot::DomImage::capture(&dom, live)));
-        });
+        let groups = dom.wrapper_groups()?;
+        let result = self
+            .vm
+            .snapshot_with_live_objects_and_groups(roots, &groups, |live| {
+                dom.snapshot_image
+                    .replace(Some(snapshot::DomImage::capture(&dom, live)));
+            });
         dom.snapshot_image.take();
         result.map_err(|error| error.to_string())
     }
@@ -321,12 +324,18 @@ impl BlitzSession {
     /// Collect unreachable VM values and detached DOM trees. Call between VM
     /// turns with drained microtasks and pass any VM values you will reuse.
     pub fn collect_garbage(&mut self, roots: &[Value]) -> Result<(), String> {
+        let (component_roots, groups): (Vec<_>, Vec<_>) =
+            self.dom.borrow().wrappers_by_root()?.into_iter().unzip();
         self.vm
-            .collect_garbage(roots)
+            .collect_garbage_with_groups(roots, &groups)
             .map_err(|error| error.to_string())?;
-        self.dom
-            .borrow_mut()
-            .sweep(|object| self.vm.has_host_instance(object));
+        let is_live = |object| self.vm.has_host_instance(object);
+        let live_roots = component_roots
+            .into_iter()
+            .zip(groups)
+            .filter_map(|(root, group)| is_live(group[0]).then_some(root))
+            .collect();
+        self.dom.borrow_mut().sweep(&live_roots, is_live);
         if self.automatic_gc_at.is_some() {
             self.automatic_gc_at = Some(self.vm.allocation_totals().0);
         }
@@ -441,6 +450,134 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    use blitz_dom::{QualName, local_name, ns};
+
+    fn native_branch(session: &BlitzSession, depth: usize) -> Vec<NodeId> {
+        let mut dom = session.dom.borrow_mut();
+        let mut parent = dom.doc.get_element_by_id("root").unwrap();
+        let mut mutation = dom.doc.mutate();
+        let mut branch = Vec::new();
+        for _ in 0..depth {
+            let id = mutation.create_element(
+                QualName::new(None, ns!(html), local_name!("div")),
+                Vec::new(),
+            );
+            mutation.append_children(parent, &[id]);
+            branch.push(id);
+            parent = id;
+        }
+        mutation.set_attribute(
+            parent,
+            QualName::new(None, ns!(), local_name!("id")),
+            "leaf",
+        );
+        branch
+    }
+
+    #[test]
+    fn deep_dom_lookup_wraps_only_requested_nodes() {
+        let mut session = BlitzSession::new(
+            compile_module(
+                r#"
+            const root = document.getElementById('root');
+            const target = document.createElement('section');
+            root.appendChild(target);
+            let leaf;
+            export function lookup() {
+                leaf = document.getElementById('leaf');
+                return leaf.nodeType === 1;
+            }
+            export function same() { return document.getElementById('leaf') === leaf; }
+            export function parent() { return leaf.parentNode.nodeType === 1; }
+            export function move() {
+                for (let i = 0; i < 8; i++) {
+                    target.appendChild(leaf);
+                    root.appendChild(leaf);
+                }
+                return leaf.parentNode === root;
+            }
+        "#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let branch = native_branch(&session, 64);
+        let count = |session: &BlitzSession| session.dom.borrow().handles.len();
+        let before = count(&session);
+        assert_eq!(
+            session.start("lookup", vec![]).unwrap(),
+            Value::boolean(true)
+        );
+        assert_eq!(count(&session), before + 1);
+        assert_eq!(session.start("same", vec![]).unwrap(), Value::boolean(true));
+        assert_eq!(count(&session), before + 1);
+        assert_eq!(
+            session.start("parent", vec![]).unwrap(),
+            Value::boolean(true)
+        );
+        assert_eq!(count(&session), before + 2);
+        assert_eq!(session.start("move", vec![]).unwrap(), Value::boolean(true));
+        let dom = session.dom.borrow();
+        assert_eq!(dom.handles.len(), before + 2);
+        assert!(branch[..62].iter().all(|id| !dom.handles.contains_key(id)));
+        assert!(branch[62..].iter().all(|id| dom.handles.contains_key(id)));
+    }
+
+    #[test]
+    fn detached_native_branch_survives_through_its_exposed_descendant() {
+        let build = compile_module(
+            r#"
+            let leaf;
+            export function detach() {
+                leaf = document.getElementById('leaf');
+                leaf.marker = 42;
+                document.getElementById('root').textContent = '';
+            }
+            export function inspect() {
+                return leaf.marker === 42 && leaf.parentNode.parentNode === null;
+            }
+            export function release() { leaf = null; }
+        "#,
+        )
+        .unwrap();
+        let mut session = BlitzSession::new(build.clone()).unwrap();
+        let branch = native_branch(&session, 2);
+        session.start("detach", vec![]).unwrap();
+        session.run_until_idle().unwrap();
+        assert!(!session.dom.borrow().handles.contains_key(&branch[0]));
+
+        let image = session.snapshot(&[]).unwrap();
+        let mut restored = BlitzSession::restore(
+            image,
+            build,
+            RestoreOptions {
+                validation: yield_vm::SnapshotValidation::Full,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let restored_root = {
+            let dom = restored.dom.borrow();
+            assert_eq!(dom.detached.len(), 1);
+            let root = *dom.detached.first().unwrap();
+            assert!(!dom.handles.contains_key(&root));
+            root
+        };
+
+        session.collect_garbage(&[]).unwrap();
+        for (session, root) in [(&mut session, branch[0]), (&mut restored, restored_root)] {
+            assert!(session.document().get_node(root).is_some());
+            assert_eq!(
+                session.start("inspect", vec![]).unwrap(),
+                Value::boolean(true)
+            );
+            session.start("release", vec![]).unwrap();
+            session.run_until_idle().unwrap();
+            session.collect_garbage(&[]).unwrap();
+            assert!(session.document().get_node(root).is_none());
+        }
+    }
 
     struct TempDir(PathBuf);
 

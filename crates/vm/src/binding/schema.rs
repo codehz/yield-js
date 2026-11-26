@@ -517,6 +517,9 @@ pub trait HostClass: ServiceOwner + Sized {
     /// index. `None` inherits the host parent's event parent source, if any.
     /// An explicit slot requires an explicit or inherited EventTarget brand.
     const EVENT_PARENT: Option<usize> = None;
+    /// Synchronous Rust parent resolver, mutually exclusive with `EVENT_PARENT`.
+    /// An explicit resolver requires an explicit or inherited EventTarget brand.
+    const EVENT_PARENT_FN: Option<EventParentFn> = None;
     const SLOTS: &'static [SlotDecl] = &[];
     const METHODS: &'static [MethodDecl] = &[];
     const ACCESSORS: &'static [AccessorDecl] = &[];
@@ -687,6 +690,16 @@ impl ClassCodec {
 
 type EmptyFn = fn(&dyn Any) -> bool;
 
+/// Resolves the parent of a branded receiver before event listeners run.
+/// This callback cannot suspend or execute guest code.
+pub type EventParentFn = fn(&mut CallCx<'_>, JsValue) -> JsResult<JsValue>;
+
+#[derive(Clone, Copy)]
+pub(crate) enum EventParent {
+    Slot(usize),
+    Callback { owner: ClassId, call: EventParentFn },
+}
+
 struct ClassDecl {
     tag: String,
     parent_ref: Option<ParentRef>,
@@ -695,8 +708,9 @@ struct ClassDecl {
     prototype_name: Option<&'static str>,
     declares_event_target: bool,
     declared_event_parent: Option<usize>,
+    declared_event_parent_fn: Option<EventParentFn>,
     event_target: bool,
-    event_parent: Option<usize>,
+    event_parent: Option<EventParent>,
     /// Leading slots inherited from the parent chain, followed by this
     /// class's own declarations. `slot_base` is the first own slot.
     slots: Vec<SlotDecl>,
@@ -1013,14 +1027,9 @@ impl Bindings {
 
     pub(crate) fn class_callback_services<C: HostClass>(
         &self,
-        target: NativeTarget,
+        index: ClassId,
     ) -> Option<Services<'_, C>> {
-        let index = match target {
-            NativeTarget::Method(id) => id.class,
-            NativeTarget::Accessor { class, .. } => class,
-            NativeTarget::Export(_) => return None,
-        };
-        let class = self.classes.get(index as usize)?;
+        let class = self.classes.get(index)?;
         if class.rust_type != TypeId::of::<C>() {
             return None;
         }
@@ -1193,8 +1202,7 @@ impl Bindings {
         self.classes[class].event_target
     }
 
-    /// Absolute index of the event parent source in the flattened slot layout.
-    pub fn class_event_parent(&self, class: ClassId) -> Option<usize> {
+    pub(crate) fn event_parent_source(&self, class: ClassId) -> Option<EventParent> {
         self.classes[class].event_parent
     }
 
@@ -1367,6 +1375,7 @@ impl ClassDecl {
             prototype_name: T::PROTOTYPE_NAME,
             declares_event_target: T::EVENT_TARGET,
             declared_event_parent: T::EVENT_PARENT,
+            declared_event_parent_fn: T::EVENT_PARENT_FN,
             event_target: false,
             event_parent: None,
             slot_base: 0,
@@ -1585,13 +1594,20 @@ fn resolve_class_layouts(classes: &mut [ClassDecl]) -> Result<(), String> {
         }
         let own = std::mem::take(&mut class.slots);
         let event_target = class.declares_event_target || inherited_event_target;
+        let tag = &class.tag;
+        if class.declared_event_parent.is_some() && class.declared_event_parent_fn.is_some() {
+            return Err(format!(
+                "class {tag:?} declares both an event parent slot and callback"
+            ));
+        }
+        if !event_target
+            && (class.declared_event_parent.is_some() || class.declared_event_parent_fn.is_some())
+        {
+            return Err(format!(
+                "class {tag:?} declares an event parent without EventTarget branding"
+            ));
+        }
         let event_parent = if let Some(slot) = class.declared_event_parent {
-            let tag = &class.tag;
-            if !event_target {
-                return Err(format!(
-                    "class {tag:?} declares an event parent without EventTarget branding"
-                ));
-            }
             if !own
                 .get(slot)
                 .is_some_and(|slot| matches!(slot.kind, SlotKind::Js))
@@ -1600,7 +1616,9 @@ fn resolve_class_layouts(classes: &mut [ClassDecl]) -> Result<(), String> {
                     "class {tag:?} event parent index {slot} must name an own single-JS slot"
                 ));
             }
-            Some(slot_base + slot)
+            Some(EventParent::Slot(slot_base + slot))
+        } else if let Some(call) = class.declared_event_parent_fn {
+            Some(EventParent::Callback { owner: index, call })
         } else {
             inherited_event_parent
         };
@@ -1711,6 +1729,9 @@ fn fingerprint(
                     class.declares_event_target, class.declared_event_parent
                 ),
             );
+        }
+        if class.declared_event_parent_fn.is_some() {
+            hasher.update(b"own-parent-callback\n");
         }
         for slot in &class.slots {
             hash_line(&mut hasher, format!("slot {} {:?}", slot.name, slot.kind));

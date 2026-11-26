@@ -111,7 +111,7 @@ impl Matcher {
 
 实例是普通 JavaScript 对象，可以有普通自有属性；槽与 payload 不可枚举、不可由 `Object.getOwnPropertyNames`、`Object.getOwnPropertySymbols` 或 `Reflect` 观察到，也不能借 `Object.create(prototype)` 伪造。原型上的方法与访问器是普通属性，脚本可以读取、改写或删除；快照保存玩家修改后的原型，而不是每个 VM 重建静态模板。
 
-`#[host_class(event_target)]` 将实例标记为 `EventTarget`；`event_parent = parent` 隐含该标记，并选择本类的单值 JS 槽作为传播父节点。标记类的派生类继承该品牌与父槽，派生类可指定自己的父槽。为保留声明的原型继承，不能在未标记父类的子类上首次声明该品牌。派发不会读取脚本属性或 getter；父槽中的 `null` / `undefined` 结束路径，非目标与循环分别抛 `TypeError`、`HierarchyRequestError`。
+`#[host_class(event_target)]` 将实例标记为 `EventTarget`。`event_parent = parent` 隐含该标记，并选择本类的单值 JS 槽作为传播父节点；互斥的 `event_parent_fn = parent` 改用同步 Rust 回调 `fn(&mut CallCx<'_>, JsValue) -> JsResult<JsValue>`，不得挂起或执行 guest JS。派生类继承该品牌与父节点来源，也可指定自己的来源。为保留声明的原型继承，不能在未标记父类的子类上首次声明该品牌。派发在调用监听器前构造完整路径，不读取脚本属性或 getter；两种来源均以 `null` / `undefined` 结束路径，非目标与循环分别抛 `TypeError`、`HierarchyRequestError`。
 
 同步绑定可用 `cx.custom_event(type, detail, bubbles, cancelable)` 创建事件；CPS 绑定用 `cx.dispatch_event(target, event).await?` 通过固定 intrinsic 派发，并收到表示未取消的 JS 布尔值。外部输入在 VM 线程用导出入口发起独立轮次，再排空微任务。平台回调不得持有 `JsValue`。
 

@@ -1,5 +1,7 @@
 //! Shared `Dom` helpers: id→handle resolution and wrapper initialization.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use blitz_dom::{NodeData, NodeId, ns};
 use yield_vm::binding::CallCx;
 use yield_vm::intrinsics::TypeError;
@@ -48,48 +50,26 @@ impl Dom {
             return Ok(node.value(cx));
         }
 
-        // Intern missing ancestors first so even the shell's original nodes
-        // have a VM-managed event parent when first wrapped.
-        let mut missing = Vec::new();
-        let mut current = Some(id);
-        let mut parent = loop {
-            let Some(id) = current else {
-                break JsValue::null();
-            };
-            if let Some(node) = self.wrapper(cx, id)? {
-                break node.value(cx);
-            }
-            let node = self
-                .doc
-                .get_node(id)
-                .ok_or_else(|| JsError::new::<TypeError>("invalid DOM node handle"))?;
-            missing.push(id);
-            current = node.parent;
-        };
-        for id in missing.into_iter().rev() {
-            let index = self.next_handle;
-            if index == u32::MAX {
-                return Err(JsError::new::<TypeError>("too many DOM nodes"));
-            }
-            let value = match &self.doc.get_node(id).expect("collected live ancestor").data {
-                NodeData::Element(element) if element.name.ns == ns!(html) => {
-                    alloc_html_element(cx, element.name.local.as_ref())?
-                }
-                NodeData::Element(_) => alloc_element(cx, Element)?.value(cx),
-                NodeData::Text(_) | NodeData::Comment { .. } => cx.alloc(Node)?.value(cx),
-                _ => return Err(JsError::new::<TypeError>("unsupported DOM node kind")),
-            };
-            init_node(cx, &value, index, owner.clone())?;
-            let wrapper = cx.instance::<Node>(&value)?;
-            if !parent.is_null() {
-                cx.instance::<Node>(&parent)?
-                    .wrapped_children_push(cx, value.clone())?;
-            }
-            wrapper.set_event_parent(cx, parent)?;
-            self.publish_node(id, index, wrapper.identity() as ObjectId);
-            parent = value;
+        let index = self.next_handle;
+        if index == u32::MAX {
+            return Err(JsError::new::<TypeError>("too many DOM nodes"));
         }
-        Ok(parent)
+        let node = self
+            .doc
+            .get_node(id)
+            .ok_or_else(|| JsError::new::<TypeError>("invalid DOM node handle"))?;
+        let value = match &node.data {
+            NodeData::Element(element) if element.name.ns == ns!(html) => {
+                alloc_html_element(cx, element.name.local.as_ref())?
+            }
+            NodeData::Element(_) => alloc_element(cx, Element)?.value(cx),
+            NodeData::Text(_) | NodeData::Comment { .. } => cx.alloc(Node)?.value(cx),
+            _ => return Err(JsError::new::<TypeError>("unsupported DOM node kind")),
+        };
+        init_node(cx, &value, index, owner)?;
+        let wrapper = cx.instance::<Node>(&value)?;
+        self.publish_node(id, index, wrapper.identity() as ObjectId);
+        Ok(value)
     }
 
     /// Cache a freshly created node id at the next handle index.
@@ -100,7 +80,41 @@ impl Dom {
         self.handles.insert(id, Some(object));
     }
 
-    pub(crate) fn sweep(&mut self, is_live: impl Fn(ObjectId) -> bool) {
+    pub(crate) fn wrapper_groups(&self) -> Result<Vec<Vec<ObjectId>>, String> {
+        Ok(self.wrappers_by_root()?.into_values().collect())
+    }
+
+    /// Group exposed wrappers by native component, caching shared ancestor paths
+    /// only for this trace. An unwrapped root can still own a live component.
+    pub(crate) fn wrappers_by_root(&self) -> Result<BTreeMap<NodeId, Vec<ObjectId>>, String> {
+        let mut groups = BTreeMap::<_, Vec<_>>::new();
+        let mut roots = BTreeMap::new();
+        let mut path = Vec::new();
+        for (&id, &identity) in &self.handles {
+            let object = identity.ok_or("missing DOM wrapper identity")?;
+            let mut current = id;
+            let root = loop {
+                if let Some(&root) = roots.get(&current) {
+                    break root;
+                }
+                let node = self.doc.get_node(current).ok_or("missing live DOM node")?;
+                path.push(current);
+                match node.parent {
+                    Some(parent) => current = parent,
+                    None => break current,
+                }
+            };
+            roots.extend(path.drain(..).map(|id| (id, root)));
+            groups.entry(root).or_default().push(object);
+        }
+        Ok(groups)
+    }
+
+    pub(crate) fn sweep(
+        &mut self,
+        live_roots: &BTreeSet<NodeId>,
+        is_live: impl Fn(ObjectId) -> bool,
+    ) {
         let handles = &mut self.handles;
         self.nodes.retain(|_, id| {
             let live = handles[id].is_some_and(&is_live);
@@ -109,18 +123,15 @@ impl Dom {
             }
             live
         });
-        // Every wrapped node has a wrapper for each ancestor. Only a live
-        // wrapper at a detached root can keep that component alive.
         let Self {
             doc,
-            handles,
             dirty_checkboxes,
             detached,
             ..
         } = self;
         let mut mutation = doc.mutate();
         detached.retain(|id| {
-            if handles.contains_key(id) {
+            if live_roots.contains(id) {
                 return true;
             }
             mutation.remove_node_if_unparented_with(*id, &mut |id| {

@@ -1,5 +1,6 @@
 use super::event_receiver;
 use crate::VmError;
+use crate::binding::EventParent;
 use crate::gc::ActiveRoots;
 use crate::heap::{AbortStep, EventListener, EventPayload, EventState, EventTargetState, Object};
 use crate::host::{Host, PlatformServices};
@@ -200,7 +201,7 @@ struct ListenerPass<'a> {
 }
 
 impl VmCore {
-    // Read only the VM-managed parent slot; never consult JS properties.
+    // Freeze the path using host-only parent sources, never JS properties.
     fn dispatch_path<P: PlatformServices>(
         &mut self,
         host: &Host<P>,
@@ -211,13 +212,31 @@ impl VmCore {
         let mut seen = BTreeSet::new();
         let mut current = target;
         while let Some(instance) = self.host_instances.get(&current) {
-            let Some(slot) = host.bindings().class_event_parent(instance.class) else {
-                break;
-            };
-            let Some(HostSlot::Js(parent)) = instance.slots.get(slot) else {
-                return Err(VmError::InvalidState(
-                    "Invalid EventTarget parent slot".into(),
-                ));
+            let bindings = host.bindings();
+            let resolved;
+            let parent = match bindings.event_parent_source(instance.class) {
+                None => break,
+                Some(EventParent::Slot(slot)) => {
+                    let Some(HostSlot::Js(parent)) = instance.slots.get(slot) else {
+                        return Err(VmError::InvalidState(
+                            "Invalid EventTarget parent slot".into(),
+                        ));
+                    };
+                    parent
+                }
+                Some(EventParent::Callback { owner, call }) => {
+                    resolved = match self.invoke_event_parent(
+                        &roots.with(&path),
+                        bindings,
+                        owner,
+                        call,
+                        current,
+                    )? {
+                        Invocation::Value(value) => value,
+                        Invocation::Thrown(error) => return Ok(Err(error)),
+                    };
+                    &resolved
+                }
             };
             let parent = match parent.view() {
                 ValueRef::Undefined | ValueRef::Null => break,

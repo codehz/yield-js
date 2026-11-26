@@ -3,29 +3,31 @@ use std::rc::Rc;
 
 use blitz_dom::NodeData;
 use yield_binding_macros::{host_class, methods};
-use yield_vm::binding::CallCx;
+use yield_vm::binding::{CallCx, with_class};
 use yield_vm::intrinsics::TypeError;
 use yield_vm::{ClassCx, JsError, JsResult, JsValue, This};
 
 use super::Dom;
 use super::node_index;
 
-#[host_class(tag = "Node", event_parent = event_parent, methods, services = [dom: Rc<RefCell<Dom>>])]
+#[host_class(tag = "Node", event_parent_fn = event_parent, methods, services = [dom: Rc<RefCell<Dom>>])]
 pub(crate) struct Node {
     #[js_slot]
     index: JsValue,
     #[js_slot]
     owner: JsValue,
-    #[js_slot]
-    event_parent: JsValue,
-    // Parent/child cycles keep all wrappers in a live native component alive.
-    // Neither these edges nor the native identity cache root a detached tree.
-    #[js_list]
-    wrapped_children: Vec<JsValue>,
 }
 
-// Local slot number in the Node declaration above (before subclass slots).
-const WRAPPED_CHILDREN_SLOT: usize = 3;
+fn event_parent(cx: &mut CallCx<'_>, receiver: JsValue) -> JsResult<JsValue> {
+    with_class::<Node, _>(cx, |cx| {
+        let wrapper = cx.instance::<Node>(&receiver)?;
+        let index = node_index(cx, wrapper)?;
+        let owner = wrapper.owner(cx)?;
+        let mut dom = Node::dom(cx.services()).borrow_mut();
+        let parent = dom.node(index)?.parent;
+        dom.resolve_node(cx, owner, parent)
+    })
+}
 
 #[methods(Node)]
 impl Node {
@@ -127,14 +129,6 @@ impl Node {
                 "textContent requires an element or character data node",
             ));
         }
-        if !is_text {
-            for &child in &node.children {
-                if let Some(wrapper) = dom.wrapper(cx, child)? {
-                    wrapper.set_event_parent(cx, JsValue::null())?;
-                }
-            }
-            this.wrapped_children_clear(cx)?;
-        }
         let Dom {
             doc,
             handles,
@@ -142,26 +136,43 @@ impl Node {
             dirty_checkboxes,
             ..
         } = &mut *dom;
-        let mut mutation = doc.mutate();
         if is_text {
-            mutation.set_node_text(id, &value);
+            doc.mutate().set_node_text(id, &value);
         } else {
-            let old_children = mutation.child_ids(id);
+            // Branches may contain exposed descendants even when their roots
+            // were never wrapped. Defer those to component sweep.
+            let unwrapped_leaves: Vec<_> = doc
+                .get_node(id)
+                .expect("validated DOM node")
+                .children
+                .iter()
+                .copied()
+                .filter(|child| {
+                    if handles.contains_key(child)
+                        || !doc
+                            .get_node(*child)
+                            .expect("live DOM child")
+                            .children
+                            .is_empty()
+                    {
+                        detached.insert(*child);
+                        false
+                    } else {
+                        true
+                    }
+                })
+                .collect();
+            let mut mutation = doc.mutate();
             if value.is_empty() {
                 mutation.replace_children(id, &[]);
             } else {
                 let text = mutation.create_text_node(&value);
                 mutation.replace_children(id, &[text]);
             }
-            for child in old_children {
-                // A wrapped descendant always has a wrapped ancestor at this root.
-                if handles.contains_key(&child) {
-                    detached.insert(child);
-                } else {
-                    mutation.remove_node_if_unparented_with(child, &mut |id| {
-                        dirty_checkboxes.remove(&id);
-                    });
-                }
+            for child in unwrapped_leaves {
+                mutation.remove_node_if_unparented_with(child, &mut |id| {
+                    dirty_checkboxes.remove(&id);
+                });
             }
         }
         Ok(())
@@ -222,13 +233,13 @@ impl Node {
                     "child mutation requires nodes from the same document",
                 ));
             }
-            Ok((node, node_index(cx, node)?))
+            node_index(cx, node)
         };
-        let (child_wrapper, child_index) = same_document_node(cx, &child)?;
+        let child_index = same_document_node(cx, &child)?;
         let parent_index = node_index(cx, this.instance())?;
         let reference = match &operation {
             ChildMutation::InsertBefore(reference) if !reference.is_null() => {
-                Some(same_document_node(cx, reference)?.1)
+                Some(same_document_node(cx, reference)?)
             }
             _ => None,
         };
@@ -240,9 +251,6 @@ impl Node {
             if child_node.parent != Some(parent_id) {
                 return Err(JsError::new::<TypeError>("node is not a direct child"));
             }
-            this.instance()
-                .list_remove_instance(cx, WRAPPED_CHILDREN_SLOT, child_wrapper)?;
-            child_wrapper.set_event_parent(cx, JsValue::null())?;
             dom.doc.mutate().remove_node(child_id);
             dom.detached.insert(child_id);
             return Ok(child);
@@ -277,18 +285,6 @@ impl Node {
                 ));
             }
             ancestor = node.parent.and_then(|id| dom.doc.get_node(id));
-        }
-        let previous_parent = child_node.parent;
-        if previous_parent != Some(parent_id) {
-            if let Some(previous) = previous_parent {
-                let previous = dom
-                    .wrapper(cx, previous)?
-                    .ok_or_else(|| JsError::fault("missing DOM parent wrapper"))?;
-                previous.list_remove_instance(cx, WRAPPED_CHILDREN_SLOT, child_wrapper)?;
-            }
-            this.wrapped_children_push(cx, child.clone())?;
-            let parent_wrapper = this.instance().value(cx);
-            child_wrapper.set_event_parent(cx, parent_wrapper)?;
         }
         let mut mutation = dom.doc.mutate();
         if let Some(reference) = reference {
