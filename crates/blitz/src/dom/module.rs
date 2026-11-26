@@ -15,7 +15,7 @@ use crate::snapshot::DomState;
 
 macro_rules! define_dom_module {
     (
-        { $(($tag:literal, $class:ident, $name:tt, $ctor:ident, $mode:ident),)* }
+        { $(($tag:literal, $class:ident, $ctor:ident, $mode:ident),)* }
         $($item:item)*
     ) => {
         use super::element::{$($class),*};
@@ -34,28 +34,28 @@ macro_rules! define_dom_module {
 
         #[module_exports]
         impl DomModule {
-            #[constructor(name = "Node", class = Node)]
+            #[constructor(class = Node)]
             fn construct_node(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<Node>> {
                 cx.alloc(Node)
             }
 
-            #[constructor(name = "Document", class = Document)]
+            #[constructor(class = Document)]
             fn construct_document(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<Document>> {
                 cx.alloc(Document)
             }
 
-            #[constructor(name = "Element", class = Element)]
+            #[constructor(class = Element)]
             fn construct_element(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<Element>> {
                 alloc_element(cx, Element)
             }
 
-            #[constructor(name = "HTMLElement", class = HTMLElement)]
+            #[constructor(class = HTMLElement)]
             fn construct_html_element(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<HTMLElement>> {
                 alloc_element(cx, HTMLElement)
             }
 
             $(
-                #[constructor(name = $name, class = $class)]
+                #[constructor(class = $class)]
                 fn $ctor(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<$class>> {
                     alloc_element(cx, $class)
                 }

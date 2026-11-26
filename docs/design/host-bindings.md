@@ -53,6 +53,8 @@
 
 `#[host_module]` 为 Rust 类型声明模块名和由 VM 管理的槽；`#[module_exports]` 标注同一类型的一个 inherent impl。`#[host_module(name = "test", classes = [Node], operations = [Wait], services = [counters: Rc<Counters>])]` 的三个列表均可省略。模块、类和 operation 各声明自己的必需服务；宏不扫描函数体，也不会因此新增 JS 导出。
 
+`#[constructor(class = path::Node)]` 省略 `name` 时，以 `class` 路径的最后一个标识符（`Node`）作为 JS 导出名。显式 `name` 优先；未指定 `class` 时仍必须提供 `name`。`#[host_class(tag)]` 从 Rust 结构体名推导宿主类标识，独立于 JS 导出名；若重命名 Rust 类型时需要保留类标识，请写 `tag = "旧标识"`。
+
 `host!` 接受 `dts`、`modules`、`services` 三段，或只有 `services`，返回 `Result<Host<P>, String>`。链接只处理选中模块的依赖：同一类或 operation 的 Rust 类型（含别名）只注册一次，不同类型使用相同类标签或 operation 名则报错。模块本身不去重。服务依赖按下述规则检查，不会自动注册；Rust 类型身份和依赖列表本身不进入绑定指纹或快照。
 
 `dts` 的相对路径以宏调用所在源文件为基准（与 `include_str!` 一致），例如 `tests/e2e/bindings.rs` 中写 `../dts/ops.d.ts`；绝对路径原样使用。只有无法确定调用文件（例如宏生成代码）时才回退到 `CARGO_MANIFEST_DIR`。VM 与编译器消费同一份规范声明：编译器只从 `.d.ts` 取得模块与值导出清单，宏把同一份声明当作实现必须满足的断言。宿主不需要实现统一的字符串分派入口。

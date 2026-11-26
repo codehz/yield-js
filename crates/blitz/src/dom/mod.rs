@@ -3,18 +3,17 @@
 //! `resolver.rs` holds the shared `Dom` helpers that map between node ids
 //! and JS handle instances.
 
-// Rows are (HTML tag, Rust class, JS name, constructor, declaration mode).
-// Consumers capture JS names as `tt` so attribute macros see bare string literals.
+// Rows are (HTML tag, Rust class, constructor, declaration mode).
 macro_rules! html_elements {
     ($consumer:ident $($extra:tt)*) => {
         $consumer! {
             {
-                ("iframe", HTMLIFrameElement, "HTMLIFrameElement", construct_iframe, plain),
-                ("input", HTMLInputElement, "HTMLInputElement", construct_input, custom),
-                ("button", HTMLButtonElement, "HTMLButtonElement", construct_button, plain),
-                ("label", HTMLLabelElement, "HTMLLabelElement", construct_label, plain),
-                ("ul", HTMLUListElement, "HTMLUListElement", construct_ul, plain),
-                ("li", HTMLLIElement, "HTMLLIElement", construct_li, plain),
+                ("iframe", HTMLIFrameElement, construct_iframe, plain),
+                ("input", HTMLInputElement, construct_input, custom),
+                ("button", HTMLButtonElement, construct_button, plain),
+                ("label", HTMLLabelElement, construct_label, plain),
+                ("ul", HTMLUListElement, construct_ul, plain),
+                ("li", HTMLLIElement, construct_li, plain),
             }
             $($extra)*
         }

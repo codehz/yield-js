@@ -1026,7 +1026,19 @@ pub(super) fn module_exports(args: TokenStream, item: TokenStream) -> Result<Tok
             &["name"]
         };
         let opts = options(attr.parse_args()?, allowed)?;
-        let name = string(required(&opts, "name", attr.span())?)?;
+        let class_path = opts.get("class").map(path).transpose()?;
+        let name = match (opts.get("name"), &class_path) {
+            (Some(name), _) => string(name)?,
+            (None, Some(class)) => {
+                let ident = &class
+                    .segments
+                    .last()
+                    .expect("parsed path is nonempty")
+                    .ident;
+                LitStr::new(&plain_ident(ident), ident.span())
+            }
+            (None, None) => string(required(&opts, "name", attr.span())?)?,
+        };
         if !keys.insert(name.value()) {
             return Err(Error::new_spanned(name, "duplicate module export name"));
         }
@@ -1036,8 +1048,7 @@ pub(super) fn module_exports(args: TokenStream, item: TokenStream) -> Result<Tok
                     lower_binding(&mut item.sig, &mut item.block, &kind, None, Some(module))?;
                 let sig = &item.sig;
                 let ident = &sig.ident;
-                let class = if let Some(class) = opts.get("class") {
-                    let class_path = path(class)?;
+                let class = if let Some(class_path) = &class_path {
                     let class_ty = Type::Path(syn::TypePath {
                         qself: None,
                         path: class_path.clone(),
@@ -1338,7 +1349,10 @@ pub(super) fn host_class(args: TokenStream, item: TokenStream) -> Result<TokenSt
     })
     .parse2(args)?;
     let span = item.ident.span();
-    let tag = string(required(&opts, "tag", span)?)?;
+    let tag = match required(&opts, "tag", span)? {
+        Meta::Path(_) => LitStr::new(&plain_ident(&item.ident), span),
+        tag => string(tag)?,
+    };
     let services = registry::service_owner(&item.ident, &item.vis, fields);
     let parent = opts.get("parent").map(path).transpose()?.map(|parent| {
         quote! {

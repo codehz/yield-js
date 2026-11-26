@@ -73,7 +73,7 @@ fn guest_build(imports: BTreeMap<String, BTreeSet<String>>, throw_on_evaluate: b
     build
 }
 
-#[host_class(tag = "Example", methods)]
+#[host_class(tag, methods)]
 struct Example {
     #[js_slot]
     item: JsValue,
@@ -100,8 +100,11 @@ struct ExampleModule;
 
 #[module_exports]
 impl ExampleModule {
-    #[constructor(name = "Example", class = Example)]
-    fn make(cx: &mut ModuleCx<'_, Self>, item: Option<JsValue>) -> JsResult<Instance<Example>> {
+    #[constructor(class = self::Example)]
+    fn make(
+        cx: &mut ModuleCx<'_, Self>,
+        item: Option<JsValue>,
+    ) -> JsResult<Instance<self::Example>> {
         let example = cx.alloc(Example)?;
         if let Some(item) = item {
             example.set_item(cx, item)?;
@@ -128,6 +131,7 @@ fn links_an_external_module_and_class() -> Result<(), String> {
         )]
         .into(),
     );
+    assert_eq!(Example::TAG, "Example");
     assert_eq!(Example::SLOTS.len(), 2);
     Ok(())
 }
