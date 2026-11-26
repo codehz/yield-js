@@ -168,6 +168,7 @@
 - 错误消息、`Symbol()` 的描述和 `Symbol.for()` 的键使用字符串 hint 转换。借用 `Array.prototype.join` 或 `toString` 时，接收者可以是对象或非空值原始类型。`join` 先按数字 hint 转换 `length`、截断并限制在 `0..=2^53−1`，再转换分隔符；原始字符串直接按 UTF-16 码元连接，不创建包装。若继承的 getter 或代理可观察接收者，则使用同一个包装对象；`toString` 也以该包装调用查找到的 `join`。数组 `length` 的赋值和定义依次执行 `ToUint32` 与独立的 `ToNumber`；结果不一致抛出 `RangeError`。这些入口都保留转换方法抛出的原值。
 - `CallCx::promise(op)` 创建一个原生 VM Promise 作为交付目标；后台任务使用相同的 operation 登记路径，并将稳定、可取消的正安全整数句柄返回给 JS。VM 先创建 operation 记录，再调用已链接的 `OperationDriver::start`。登记对象的 `Drop` 释放平台资源；`checkpoint` 只更新镜像状态。捕获时宿主必须保持外部逻辑时间和投递在同一切点。旧代、重复及未知令牌被拒绝。`Pause` 和 `Reject` 在恢复时结算原目标；`Resume` / `Reissue` 由 `Vm::start_recovered_operations()` 在发布后重新登记，失败只拒绝该目标。
 - 宿主导出函数、原型方法和访问器都是 VM 自有函数对象；调用目标按声明 ID 分派，普通属性及内部原型随快照保存。函数对象支持 `bind`、`call` 和 `apply`。
+- 类型化宿主函数、构造器和方法可声明必需位置、可选位置和一个末尾 `&[JsValue]`。仅省略的可选位置解码为 `None`；rest 在全部固定位置后按原顺序借用实参，保留值身份且不展开数组。`.length` 计入必需和可选位置，不计 rest；绑定指纹只通过声明的 `.length` 区分参数。
 - `host!` 在编译期拒绝选中消费者缺少必需的自定义服务，以及同一确切类型（含别名）的重复注册。每个宿主构造独立的消费者视图，回调直接借用视图字段；宿主侧的 `bind_service::<T>()` 仍可按类型查询。视图、布局和实例不进入快照或绑定指纹。
 - `cx.construct::<TypeError>(&args)` 在当前调用中创建 `TypeError`；`stack` 首行只加一次 `TypeError: `，随后记录可见的同步脚本调用帧。以 `cx.throw(value)` 交付脚本异常。
 - `JsError::new::<TypeError>(message)` 保存 intrinsic 引用和消息，进入脚本时才分配对象；宿主可在持有服务借用等不便调用 `CallCx` 的位置使用。

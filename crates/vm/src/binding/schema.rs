@@ -236,12 +236,6 @@ impl SuspendRequest {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum ArgKind {
-    Value,
-    OptionalValue,
-}
-
-#[derive(Debug, Clone, Copy)]
 pub enum ReturnKind {
     Value,
     Void,
@@ -251,7 +245,7 @@ pub enum ReturnKind {
 
 #[derive(Debug, Clone, Copy)]
 pub struct CallSignature {
-    pub args: &'static [ArgKind],
+    pub arity: usize,
     pub result: ReturnKind,
 }
 
@@ -489,7 +483,7 @@ pub struct AccessorCall {
 
 impl AccessorCall {
     pub(crate) fn arity(self) -> usize {
-        self.signature.args.len()
+        self.signature.arity
     }
 }
 
@@ -754,8 +748,8 @@ pub mod __macro_support {
     };
     use super::{AccessorCall, CodecError, UnlinkedBindings};
     pub use super::{
-        AccessorDecl, ArgKind, CallSignature, CpsBoundary, CpsStage, ExportDecl, MemberName,
-        MethodDecl, ModuleDecl, ResumeCall, ReturnKind,
+        AccessorDecl, CallSignature, CpsBoundary, CpsStage, ExportDecl, MemberName, MethodDecl,
+        ModuleDecl, ResumeCall, ReturnKind,
     };
     use super::{ClassDecl, HostClass, ModuleExports, OperationDecl, OperationDriver, StateDecl};
     use super::{ConstValue, ConstantDecl, FunctionDecl, HostCall};
@@ -877,7 +871,7 @@ pub mod __macro_support {
     ) -> ExportDecl {
         ExportDecl::Function(FunctionDecl {
             name: name.to_owned(),
-            arity: signature.args.len(),
+            arity: signature.arity,
             constructable,
             class,
             call: ExportCall::Plain(call),
@@ -896,7 +890,7 @@ pub mod __macro_support {
     ) -> ExportDecl {
         ExportDecl::Function(FunctionDecl {
             name: name.to_owned(),
-            arity: signature.args.len(),
+            arity: signature.arity,
             constructable,
             class,
             call: ExportCall::Plain(call),
@@ -915,7 +909,7 @@ pub mod __macro_support {
     ) -> ExportDecl {
         ExportDecl::Function(FunctionDecl {
             name: name.to_owned(),
-            arity: signature.args.len(),
+            arity: signature.arity,
             constructable,
             class,
             call: ExportCall::Module(call),
@@ -934,7 +928,7 @@ pub mod __macro_support {
     pub const fn method(name: MemberName, call: HostCall, signature: CallSignature) -> MethodDecl {
         MethodDecl {
             name,
-            arity: signature.args.len(),
+            arity: signature.arity,
             call,
             signature,
             cps: None,
@@ -949,7 +943,7 @@ pub mod __macro_support {
     ) -> MethodDecl {
         MethodDecl {
             name,
-            arity: signature.args.len(),
+            arity: signature.arity,
             call,
             signature,
             cps: Some(stages),
@@ -1637,13 +1631,7 @@ fn hash_line(hasher: &mut Digest, text: String) {
 
 fn hash_signature(hasher: &mut Digest, direction: u8, signature: CallSignature) {
     hasher.update([direction]);
-    hasher.update((signature.args.len() as u64).to_le_bytes());
-    for arg in signature.args {
-        hasher.update([match arg {
-            ArgKind::Value => 0,
-            ArgKind::OptionalValue => 1,
-        }]);
-    }
+    hasher.update((signature.arity as u64).to_le_bytes());
     match signature.result {
         ReturnKind::Value => hasher.update([0]),
         ReturnKind::Void => hasher.update([1]),
@@ -1689,8 +1677,8 @@ fn fingerprint(
                     hash_line(
                         &mut hasher,
                         format!(
-                            "export {} function arity={} constructable={} class={:?}",
-                            function.name, function.arity, function.constructable, function.class
+                            "export {} function constructable={} class={:?}",
+                            function.name, function.constructable, function.class
                         ),
                     );
                     hash_signature(&mut hasher, 0, function.signature);
@@ -1731,10 +1719,7 @@ fn fingerprint(
             hasher.update(b"payload\n");
         }
         for method in &class.methods {
-            hash_line(
-                &mut hasher,
-                format!("method {} arity={}", method.name, method.arity),
-            );
+            hash_line(&mut hasher, format!("method {}", method.name));
             hash_signature(&mut hasher, 1, method.signature);
             hash_cps(&mut hasher, method.cps);
         }

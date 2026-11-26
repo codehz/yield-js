@@ -269,8 +269,15 @@ pub(super) fn has_class_context(sig: &Signature) -> bool {
             if last(&reference.elem).is_some_and(|segment| segment.ident == "ClassCx")))
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Parameter {
+    Required,
+    Optional,
+    Rest,
+}
+
 struct Call {
-    optional: Vec<bool>,
+    parameters: Vec<Parameter>,
     output: Output,
     class_context: bool,
 }
@@ -344,19 +351,34 @@ impl Call {
                 ));
             }
         }
-        let mut optional = Vec::new();
+        let mut parameters = Vec::new();
         for ty in inputs {
             let ty = ty?;
-            if simple(ty, "JsValue") {
-                optional.push(false);
+            if parameters.last() == Some(&Parameter::Rest) {
+                return Err(Error::new_spanned(ty, "rest parameter must be last"));
+            }
+            let parameter = if simple(ty, "JsValue") {
+                if parameters.last() == Some(&Parameter::Optional) {
+                    return Err(Error::new_spanned(
+                        ty,
+                        "required parameters must precede optional parameters",
+                    ));
+                }
+                Parameter::Required
             } else if wrapped(ty, "Option").is_some_and(|inner| simple(inner, "JsValue")) {
-                optional.push(true);
+                Parameter::Optional
+            } else if matches!(ty, Type::Reference(reference)
+                if reference.mutability.is_none() && reference.lifetime.is_none()
+                && matches!(reference.elem.as_ref(), Type::Slice(slice) if simple(&slice.elem, "JsValue")))
+            {
+                Parameter::Rest
             } else {
                 return Err(Error::new_spanned(
                     ty,
-                    "JavaScript parameters must be JsValue or Option<JsValue>",
+                    "JavaScript parameters must be JsValue, Option<JsValue>, or &[JsValue]",
                 ));
-            }
+            };
+            parameters.push(parameter);
         }
         let ReturnType::Type(_, ty) = &sig.output else {
             return Err(Error::new_spanned(sig, "expected a JsResult return type"));
@@ -386,20 +408,15 @@ impl Call {
             }
         };
         Ok(Self {
-            optional,
+            parameters,
             output,
             class_context,
         })
     }
 
     fn signature(&self) -> TokenStream {
-        let args = self.optional.iter().map(|optional| {
-            if *optional {
-                quote!(OptionalValue)
-            } else {
-                quote!(Value)
-            }
-        });
+        let arity =
+            self.parameters.len() - usize::from(self.parameters.last() == Some(&Parameter::Rest));
         let result = match &self.output {
             Output::Value => quote!(Value),
             Output::Void => quote!(Void),
@@ -408,7 +425,7 @@ impl Call {
         };
         quote! {
             ::yield_vm::__macro_support::CallSignature {
-                args: &[#(::yield_vm::__macro_support::ArgKind::#args),*],
+                arity: #arity,
                 result: ::yield_vm::__macro_support::ReturnKind::#result,
             }
         }
@@ -423,20 +440,19 @@ impl Call {
     ) -> TokenStream {
         let decode_this = receiver.map(|class| quote!(let receiver = cx.this::<#class>()?;));
         let pass_this = receiver.map(|_| quote!(receiver,));
-        let names = (0..self.optional.len())
+        let names = (0..self.parameters.len())
             .map(|i| format_ident!("arg_{i}"))
             .collect::<Vec<_>>();
-        let decode = names
-            .iter()
-            .zip(&self.optional)
-            .enumerate()
-            .map(|(i, (name, optional))| {
-                if *optional {
-                    quote!(let #name = cx.args().get(#i).cloned();)
-                } else {
-                    quote!(let #name = cx.arg(#i)?;)
-                }
-            });
+        let decode =
+            names
+                .iter()
+                .zip(&self.parameters)
+                .enumerate()
+                .map(|(i, (name, parameter))| match parameter {
+                    Parameter::Required => quote!(let #name = cx.arg(#i)?;),
+                    Parameter::Optional => quote!(let #name = cx.args().get(#i).cloned();),
+                    Parameter::Rest => quote!(let #name = cx.args().get(#i..).unwrap_or_default();),
+                });
         let call = quote!(#target(cx, #pass_this #(#names),*));
         let call = if self.class_context {
             let class = receiver.expect("class context has a receiver");
@@ -1594,7 +1610,7 @@ pub(super) fn methods(args: TokenStream, item: TokenStream) -> Result<TokenStrea
             Some(&class),
             None,
         )?;
-        if kind == "get" && !call.optional.is_empty() {
+        if kind == "get" && !call.parameters.is_empty() {
             return Err(Error::new_spanned(
                 &method.sig,
                 "getter must take no JavaScript parameters",
@@ -1606,7 +1622,9 @@ pub(super) fn methods(args: TokenStream, item: TokenStream) -> Result<TokenStrea
                 "getter cannot return JsResult<HostStep>",
             ));
         }
-        if kind == "set" && (call.optional != [false] || !matches!(call.output, Output::Void)) {
+        if kind == "set"
+            && (call.parameters != [Parameter::Required] || !matches!(call.output, Output::Void))
+        {
             return Err(Error::new_spanned(
                 &method.sig,
                 "setter must take one required JsValue and return JsResult<()>",
@@ -1709,6 +1727,126 @@ mod tests {
     }
 
     #[test]
+    fn rejects_invalid_parameter_layouts() {
+        for (parameters, expected) in [
+            (
+                quote!(a: Option<JsValue>, b: JsValue),
+                "required parameters must precede optional parameters",
+            ),
+            (
+                quote!(a: &[JsValue], b: JsValue),
+                "rest parameter must be last",
+            ),
+            (
+                quote!(a: &[JsValue], b: Option<JsValue>),
+                "rest parameter must be last",
+            ),
+            (
+                quote!(a: &[JsValue], b: &[JsValue]),
+                "rest parameter must be last",
+            ),
+        ] {
+            diagnostic(
+                module_exports(
+                    quote!(),
+                    quote! {
+                        impl X {
+                            #[function(name = "f")]
+                            fn f(cx: &mut ModuleCx<'_, Self>, #parameters) -> JsResult<()> { Ok(()) }
+                        }
+                    },
+                ),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_rest_types() {
+        for ty in [
+            quote!([JsValue]),
+            quote!(&mut [JsValue]),
+            quote!(&[u8]),
+            quote!(&'_ [JsValue]),
+        ] {
+            let function: syn::ItemFn = syn::parse_quote! {
+                fn f(cx: &mut CallCx<'_>, rest: #ty) -> JsResult<()> { Ok(()) }
+            };
+            diagnostic(
+                Call::parse(&function.sig, None, false).map(|call| call.signature()),
+                "JavaScript parameters must be JsValue, Option<JsValue>, or &[JsValue]",
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_rest_accessors() {
+        for (marker, output, expected) in [
+            (
+                quote!(get),
+                quote!(JsValue),
+                "getter must take no JavaScript parameters",
+            ),
+            (
+                quote!(set),
+                quote!(()),
+                "setter must take one required JsValue",
+            ),
+        ] {
+            diagnostic(
+                methods(
+                    quote!(C),
+                    quote! {
+                        impl C {
+                            #[#marker(name = "x")]
+                            fn x(cx: &mut CallCx<'_>, this: This<Self>, rest: &[JsValue]) -> JsResult<#output> {
+                                unreachable!()
+                            }
+                        }
+                    },
+                ),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_rest_exports_and_both_method_contexts() {
+        module_exports(
+            quote!(),
+            quote! {
+                impl X {
+                    #[function(name = "f")]
+                    fn f(cx: &mut ModuleCx<'_, Self>, a: JsValue, b: Option<JsValue>, rest: &[JsValue]) -> JsResult<()> {
+                        Ok(())
+                    }
+                    #[constructor(name = "C", class = C)]
+                    fn new(cx: &mut ModuleCx<'_, Self>, rest: &[JsValue]) -> JsResult<Instance<C>> {
+                        cx.alloc(C)
+                    }
+                }
+            },
+        )
+        .unwrap();
+        methods(
+            quote!(C),
+            quote! {
+                impl C {
+                    #[method(name = "plain")]
+                    fn plain(cx: &mut CallCx<'_>, this: This<Self>, b: Option<JsValue>, rest: &[JsValue]) -> JsResult<()> {
+                        Ok(())
+                    }
+                    #[method(name = "class")]
+                    fn class(cx: &mut ClassCx<'_, '_, Self>, this: This<Self>, a: JsValue, rest: &[JsValue]) -> JsResult<()> {
+                        Ok(())
+                    }
+                }
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn spawn_function_keeps_original_js_signature() {
         let expanded = module_exports(
             quote!(),
@@ -1739,7 +1877,6 @@ mod tests {
         assert!(expanded.contains("< X > :: operation"));
         assert!(!expanded.contains("Self :: operation"));
         assert_eq!(expanded.matches("ReturnKind :: Value").count(), 2);
-        assert!(expanded.contains("ArgKind :: OptionalValue"));
         assert!(expanded.contains("< X > :: promise (cx ,) . map"));
         assert!(expanded.contains("< X > :: start (cx , arg_0)"));
         assert!(!expanded.contains("< X > :: start (cx , arg_0) . map"));

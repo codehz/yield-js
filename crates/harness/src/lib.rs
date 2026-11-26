@@ -1086,6 +1086,30 @@ impl TestModule {
         Ok(matcher)
     }
 
+    #[function(name = "lastArgument")]
+    fn last_argument(_: &mut yield_vm::ModuleCx<'_, Self>, rest: &[JsValue]) -> JsResult<JsValue> {
+        Ok(rest.last().cloned().unwrap_or_else(JsValue::null))
+    }
+
+    #[function(name = "restAt")]
+    async fn rest_at(
+        cx: &mut yield_vm::ModuleCx<'_, Self>,
+        index: JsValue,
+        optional: Option<JsValue>,
+        rest: &[JsValue],
+    ) -> JsResult<HostStep> {
+        let index = cx.number(&index)?;
+        let value = if index == -1.0 {
+            optional.unwrap_or_else(JsValue::null)
+        } else {
+            rest.get(index as usize)
+                .cloned()
+                .unwrap_or_else(JsValue::null)
+        };
+        cx.gc().await?;
+        Ok(HostStep::Return(value))
+    }
+
     #[function(name = "assert")]
     fn assert(
         cx: &mut yield_vm::ModuleCx<'_, Self>,

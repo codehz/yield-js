@@ -498,7 +498,7 @@ pub struct CallCx<'a> {
     pub(crate) owner: NativeTarget,
     pub(crate) epoch: u32,
     pub(crate) call: u64,
-    pub(crate) args: Vec<JsValue>,
+    pub(crate) args: &'a [JsValue],
     pub(crate) this: JsValue,
     pub(crate) construct: bool,
     pub(crate) allocation_prototype: Option<(ClassId, ObjectId)>,
@@ -508,8 +508,9 @@ pub struct CallCx<'a> {
 }
 
 impl<'a> CallCx<'a> {
-    pub fn args(&self) -> &[JsValue] {
-        &self.args
+    /// The argument handles for this synchronous stage.
+    pub fn args(&self) -> &'a [JsValue] {
+        self.args
     }
 
     pub fn arg(&mut self, index: usize) -> JsResult<JsValue> {
@@ -800,7 +801,7 @@ impl<'a> CallCx<'a> {
         for arg in args {
             self.check_value(arg)?;
         }
-        let live = (&self.handles, &self.args);
+        let live = (&self.handles, self.args);
         let result = (self.initialize_class)(
             self.vm,
             &self.roots.with(&live),

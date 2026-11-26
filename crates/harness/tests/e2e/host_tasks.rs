@@ -6,7 +6,7 @@ use std::rc::Rc;
 use super::support::{compile_main, declared};
 use yield_harness::{Counters, LabelService, Wait};
 use yield_vm::__macro_support as abi;
-use yield_vm::binding::{ArgKind, CallCx, CallSignature, CpsBoundary, CpsStage, ReturnKind};
+use yield_vm::binding::{CallCx, CallSignature, CpsBoundary, CpsStage, ReturnKind};
 use yield_vm::intrinsics::Error;
 use yield_vm::{
     Completion, Diagnostic, Diagnostics, GuestOutcome, Host, HostStep, JsResult, JsValue,
@@ -37,7 +37,7 @@ fn task_host(labels: &Rc<LabelService>) -> Host<impl yield_vm::PlatformServices>
                 None,
                 spawn,
                 CallSignature {
-                    args: &[ArgKind::Value],
+                    arity: 1,
                     result: ReturnKind::Value,
                 },
                 &STAGES,
@@ -48,7 +48,7 @@ fn task_host(labels: &Rc<LabelService>) -> Host<impl yield_vm::PlatformServices>
                 None,
                 cancel,
                 CallSignature {
-                    args: &[ArgKind::Value],
+                    arity: 1,
                     result: ReturnKind::Void,
                 },
             ),

@@ -737,6 +737,7 @@ impl VmCore {
             self.next_host_call = self.next_host_call.checked_add(1).unwrap_or(1);
             let epoch = self.epoch;
             let wrap = |value| JsValue::handle(value, epoch, call_id);
+            let stage_args: Vec<JsValue> = args.into_iter().map(wrap).collect();
             let mut cx = CallCx {
                 vm: self,
                 roots,
@@ -744,7 +745,7 @@ impl VmCore {
                 owner,
                 epoch,
                 call: call_id,
-                args: args.into_iter().map(wrap).collect(),
+                args: &stage_args,
                 this: wrap(receiver.clone()),
                 construct: construction.is_some() && matches!(entry, HostEntry::Call(_)),
                 allocation_prototype,

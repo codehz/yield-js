@@ -123,7 +123,7 @@ impl Matcher {
 
 - 模块名、导出名及种类、每个模块的状态槽名字/顺序/种类；
 - 类标签、槽名字/顺序/种类、codec 标识；
-- 成员名、种类（方法/访问器/数据）、参数与返回种类；
+- 成员名、种类（方法/访问器/数据）、声明的 `.length` 与返回种类；
 - operation 类型、恢复策略。
 
 指纹不含 Rust 类型名、函数地址、宏展开细节或调试名称，因此重命名内部符号不会使快照失效；删除槽、改变顺序、更换 codec 或改变恢复策略会使快照失效。变更策略沿用项目的精确版本约定：不自动迁移，报告具体不匹配项。
@@ -503,7 +503,7 @@ flowchart TB
 
 脚本 `class` / `extends` / `super` 已支持：脚本派生实例的原型、宿主槽和 payload、脚本私元素均可跨快照恢复，恢复不再执行构造器或初始化器。BigInt 值域已落地：`JsValue::bigint` / `as_bigint`、`Inspect::bigint` 和 `InspectKind::BigInt`，并以规范十进制在构建与快照中往返。尚未实现：TypeScript 生成、C ABI、弱引用槽、`JsMap` 槽和流式 payload；恢复资源限制仅由可信本地快照这一前提约束。
 
-Rust 回调从 `&mut CallCx<'_>` 开始，类成员接着接收 `This<Class>`；其余位置为 `JsValue`（必需）或 `Option<JsValue>`（省略为 `None`，显式 `undefined` 为 `Some`）。参数位置数（含可选位置）决定声明的 arity，完整签名进入绑定指纹。返回类型是 `JsResult<JsValue>`、`JsResult<()>` 或 `JsResult<Instance<T>>`。VM 内部调用协议不变；不匹配的旧绑定指纹按 `InvalidSnapshot` 拒绝，不迁移也不启动恢复工作。
+Rust 回调从 `&mut CallCx<'_>` 或对应的模块、类上下文开始，类成员接着接收 `This<Class>`。JS 形参依次是必需的 `JsValue`、可选的 `Option<JsValue>`（省略为 `None`，显式 `undefined` 为 `Some`），以及至多一个末尾的 `&[JsValue]`。切片借用当前同步阶段的实参句柄：从全部固定位置之后取值，不展开数组，不跨挂起保存。未声明 rest 时忽略多余实参。固定位置数（含可选位置）决定声明的 `.length`；指纹只记录这个参数数量，不区分必需与可选，也不记录 rest。返回类型是 `JsResult<JsValue>`、`JsResult<()>` 或 `JsResult<Instance<T>>`；CPS 入口使用 `JsResult<HostStep>`。VM 内部调用协议不变；不匹配的绑定指纹按 `InvalidSnapshot` 拒绝，不迁移也不启动恢复工作。
 
 宏展开引用 `::yield_vm`；如果依赖在 Cargo 中改名，在消费 crate 根用 `extern crate <依赖名> as yield_vm;` 提供该名字。`#[js_slot]` / `#[js_list]` 字段不进入 Rust payload；类用生成的 `<Class>Slots` trait 访问槽，模块状态用 `SLOT_<字段大写>` 索引。如果槽方法名被 `Instance` 的固有方法遮蔽，可用 `<Class>Slots::槽方法(&instance, cx)`。
 

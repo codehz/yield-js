@@ -30,6 +30,9 @@ declare module "test" {
     export function expect(actual?: unknown): unknown;
     /** Throws a host string error unless `actual` is truthy. */
     export function assert(actual?: unknown, message?: unknown): void;
+    export function lastArgument(...rest: unknown[]): unknown;
+    /** Returns a rest argument by index, or the optional argument for index -1. */
+    export function restAt(index: number, optional?: unknown, ...rest: unknown[]): unknown;
     /** Declared host error subclass constructor. */
     export class ParseError extends Error {
         constructor(message?: unknown, options?: unknown);
