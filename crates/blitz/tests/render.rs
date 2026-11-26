@@ -440,6 +440,9 @@ fn restores_html_wrappers_and_reflected_attributes() -> Result<(), String> {
         const label = document.createElement('label');
         const list = document.createElement('ul');
         const item = document.createElement('li');
+        const heading = document.createElement('H3');
+        heading.id = 'heading';
+        root.appendChild(heading);
         if (button.disabled || label.htmlFor !== '' || item.id !== '' || item.className !== '') {
             throw new Error('missing attributes must reflect as false or empty strings');
         }
@@ -459,16 +462,23 @@ fn restores_html_wrappers_and_reflected_attributes() -> Result<(), String> {
         export function check() {
             for (const [node, id, type] of [[button, 'action', HTMLButtonElement],
                 [label, 'label', HTMLLabelElement], [list, 'list', HTMLUListElement],
-                [item, 'item', HTMLLIElement]]) {
+                [item, 'item', HTMLLIElement], [heading, 'heading', HTMLHeadingElement],
+                [root, 'root', HTMLDivElement]]) {
                 if (Object.getPrototypeOf(node) !== type.prototype || !(node instanceof HTMLElement) ||
                     document.getElementById(id) !== node || document.getElementById(id) !== node) {
                     throw new Error('wrapper identity or prototype changed: ' + id);
                 }
             }
             for (const [tag, type] of [['input', HTMLInputElement],
-                ['iframe', HTMLIFrameElement], ['section', HTMLElement]]) {
-                if (Object.getPrototypeOf(document.createElement(tag)) !== type.prototype) {
-                    throw new Error('wrong prototype for createElement: ' + tag);
+                ['iframe', HTMLIFrameElement], ['section', HTMLElement],
+                ['div', HTMLDivElement], ['span', HTMLSpanElement], ['p', HTMLParagraphElement],
+                ['ol', HTMLOListElement], ['blockquote', HTMLQuoteElement], ['q', HTMLQuoteElement],
+                ['pre', HTMLPreElement], ['br', HTMLBRElement], ['hr', HTMLHRElement],
+                ['h1', HTMLHeadingElement], ['h2', HTMLHeadingElement], ['h3', HTMLHeadingElement],
+                ['h4', HTMLHeadingElement], ['h5', HTMLHeadingElement], ['h6', HTMLHeadingElement]]) {
+                const node = document.createElement(tag);
+                if (Object.getPrototypeOf(node) !== type.prototype || node.tagName !== tag.toUpperCase()) {
+                    throw new Error('wrong prototype or tag name for createElement: ' + tag);
                 }
             }
             const section = document.createElement('section');

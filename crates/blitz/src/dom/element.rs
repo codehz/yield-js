@@ -17,11 +17,11 @@ pub(super) struct HTMLElement;
 
 macro_rules! bind_html_elements {
     (
-        { $(($tag:literal, $class:ident, $ctor:ident $(, from $owner:ident)?),)* }
+        { $(([$($tag:literal),+], $class:ident, $ctor:ident $(, from $owner:ident)?),)* }
     ) => {
         pub(super) fn alloc_html_element(cx: &mut CallCx<'_>, tag: &str) -> JsResult<JsValue> {
             Ok(match tag {
-                $($tag => alloc_element(cx, super::$($owner ::)? $class)?.value(cx),)*
+                $($($tag)|+ => alloc_element(cx, super::$($owner ::)? $class)?.value(cx),)*
                 _ => alloc_element(cx, HTMLElement)?.value(cx),
             })
         }

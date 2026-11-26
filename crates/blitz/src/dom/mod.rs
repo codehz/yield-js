@@ -3,17 +3,26 @@
 //! `resolver.rs` holds the shared `Dom` helpers that map between node ids
 //! and JS handle instances.
 
-// Rows declare a class here unless `from module` names the sibling that defines it.
+// Each class owns one or more tags. `from module` names an existing binding.
 macro_rules! html_elements {
     ($consumer:ident $($extra:tt)*) => {
         $consumer! {
             {
-                ("iframe", HTMLIFrameElement, construct_iframe),
-                ("input", HTMLInputElement, construct_input, from input),
-                ("button", HTMLButtonElement, construct_button),
-                ("label", HTMLLabelElement, construct_label),
-                ("ul", HTMLUListElement, construct_ul),
-                ("li", HTMLLIElement, construct_li),
+                (["iframe"], HTMLIFrameElement, construct_iframe),
+                (["input"], HTMLInputElement, construct_input, from input),
+                (["button"], HTMLButtonElement, construct_button),
+                (["label"], HTMLLabelElement, construct_label),
+                (["ul"], HTMLUListElement, construct_ul),
+                (["li"], HTMLLIElement, construct_li),
+                (["div"], HTMLDivElement, construct_div),
+                (["span"], HTMLSpanElement, construct_span),
+                (["h1", "h2", "h3", "h4", "h5", "h6"], HTMLHeadingElement, construct_heading),
+                (["p"], HTMLParagraphElement, construct_paragraph),
+                (["ol"], HTMLOListElement, construct_ol),
+                (["blockquote", "q"], HTMLQuoteElement, construct_quote),
+                (["pre"], HTMLPreElement, construct_pre),
+                (["br"], HTMLBRElement, construct_br),
+                (["hr"], HTMLHRElement, construct_hr),
             }
             $($extra)*
         }
@@ -29,7 +38,7 @@ macro_rules! declare_html_element {
 }
 
 macro_rules! declare_html_elements {
-    ({ $(($tag:literal, $class:ident, $ctor:ident $(, from $owner:ident)?),)* }) => {
+    ({ $(($tags:tt, $class:ident, $ctor:ident $(, from $owner:ident)?),)* }) => {
         $(declare_html_element!($class $(, from $owner)?);)*
     };
 }

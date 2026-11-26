@@ -7,6 +7,10 @@ export {
   HTMLElement, HTMLIFrameElement, HTMLInputElement, HTMLButtonElement,
   HTMLLabelElement, HTMLUListElement, HTMLLIElement,
 };
+export {
+  HTMLDivElement, HTMLSpanElement, HTMLHeadingElement, HTMLParagraphElement,
+  HTMLOListElement, HTMLQuoteElement, HTMLPreElement, HTMLBRElement, HTMLHRElement,
+} from 'yield:dom';
 export const window = globalThis;
 export const document = openDocument(window);
 

@@ -15,7 +15,7 @@ use crate::snapshot::DomState;
 
 macro_rules! define_dom_module {
     (
-        { $(($tag:literal, $class:ident, $ctor:ident $(, from $owner:ident)?),)* }
+        { $(($tags:tt, $class:ident, $ctor:ident $(, from $owner:ident)?),)* }
         $($item:item)*
     ) => {
         use super::{$($($owner ::)? $class),*};
