@@ -8,79 +8,66 @@ use yield_vm::{HostStep, Instance, JsError, JsResult, JsValue, ModuleCx};
 
 use super::Dom;
 use super::document::{Document, DocumentSlots};
-use super::element::{
-    Element, HTMLButtonElement, HTMLElement, HTMLIFrameElement, HTMLLIElement, HTMLLabelElement,
-    HTMLUListElement, alloc_element,
-};
-use super::input::HTMLInputElement;
+use super::element::{Element, HTMLElement, alloc_element};
 use super::node::Node;
 use super::resolver::init_node;
 use crate::snapshot::DomState;
 
-#[host_module(
-    name = "yield:dom",
-    classes = [Node, Document, Element, HTMLElement, HTMLIFrameElement, HTMLInputElement,
-        HTMLButtonElement, HTMLLabelElement, HTMLUListElement, HTMLLIElement],
-    services = [dom: Rc<RefCell<Dom>>],
-)]
-#[derive(Default, yield_vm::Encode, yield_vm::Decode)]
-pub struct DomModule {
-    state: DomState,
-    #[js_slot]
-    document: JsValue,
+macro_rules! define_dom_module {
+    (
+        { $(($tag:literal, $class:ident, $name:tt, $ctor:ident, $mode:ident),)* }
+        $($item:item)*
+    ) => {
+        use super::element::{$($class),*};
+
+        #[host_module(
+            name = "yield:dom",
+            classes = [Node, Document, Element, HTMLElement, $($class,)*],
+            services = [dom: Rc<RefCell<Dom>>],
+        )]
+        #[derive(Default, yield_vm::Encode, yield_vm::Decode)]
+        pub struct DomModule {
+            state: DomState,
+            #[js_slot]
+            document: JsValue,
+        }
+
+        #[module_exports]
+        impl DomModule {
+            #[constructor(name = "Node", class = Node)]
+            fn construct_node(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<Node>> {
+                cx.alloc(Node)
+            }
+
+            #[constructor(name = "Document", class = Document)]
+            fn construct_document(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<Document>> {
+                cx.alloc(Document)
+            }
+
+            #[constructor(name = "Element", class = Element)]
+            fn construct_element(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<Element>> {
+                alloc_element(cx, Element)
+            }
+
+            #[constructor(name = "HTMLElement", class = HTMLElement)]
+            fn construct_html_element(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<HTMLElement>> {
+                alloc_element(cx, HTMLElement)
+            }
+
+            $(
+                #[constructor(name = $name, class = $class)]
+                fn $ctor(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<$class>> {
+                    alloc_element(cx, $class)
+                }
+            )*
+
+            $($item)*
+        }
+    };
 }
 
-#[module_exports]
-impl DomModule {
-    #[constructor(name = "Node", class = Node)]
-    fn construct_node(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<Node>> {
-        cx.alloc(Node)
-    }
-
-    #[constructor(name = "Document", class = Document)]
-    fn construct_document(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<Document>> {
-        cx.alloc(Document)
-    }
-
-    #[constructor(name = "Element", class = Element)]
-    fn construct_element(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<Element>> {
-        alloc_element(cx, Element)
-    }
-
-    #[constructor(name = "HTMLElement", class = HTMLElement)]
-    fn construct_html_element(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<HTMLElement>> {
-        alloc_element(cx, HTMLElement)
-    }
-
-    #[constructor(name = "HTMLButtonElement", class = HTMLButtonElement)]
-    fn construct_button(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<HTMLButtonElement>> {
-        alloc_element(cx, HTMLButtonElement)
-    }
-
-    #[constructor(name = "HTMLLabelElement", class = HTMLLabelElement)]
-    fn construct_label(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<HTMLLabelElement>> {
-        alloc_element(cx, HTMLLabelElement)
-    }
-
-    #[constructor(name = "HTMLUListElement", class = HTMLUListElement)]
-    fn construct_ul(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<HTMLUListElement>> {
-        alloc_element(cx, HTMLUListElement)
-    }
-
-    #[constructor(name = "HTMLLIElement", class = HTMLLIElement)]
-    fn construct_li(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<HTMLLIElement>> {
-        alloc_element(cx, HTMLLIElement)
-    }
-
-    #[constructor(name = "HTMLIFrameElement", class = HTMLIFrameElement)]
-    fn construct_iframe(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<HTMLIFrameElement>> {
-        alloc_element(cx, HTMLIFrameElement)
-    }
-
-    #[constructor(name = "HTMLInputElement", class = HTMLInputElement)]
-    fn construct_input(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<HTMLInputElement>> {
-        alloc_element(cx, HTMLInputElement)
-    }
+html_elements! {
+    define_dom_module
 
     #[function(name = "dispatchUserEvent")]
     async fn dispatch_user_event(cx: &mut ModuleCx<'_, Self>) -> JsResult<HostStep> {

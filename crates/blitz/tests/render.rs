@@ -465,6 +465,22 @@ fn restores_html_wrappers_and_reflected_attributes() -> Result<(), String> {
                     throw new Error('wrapper identity or prototype changed: ' + id);
                 }
             }
+            for (const [tag, type] of [['input', HTMLInputElement],
+                ['iframe', HTMLIFrameElement], ['section', HTMLElement]]) {
+                if (Object.getPrototypeOf(document.createElement(tag)) !== type.prototype) {
+                    throw new Error('wrong prototype for createElement: ' + tag);
+                }
+            }
+            const section = document.createElement('section');
+            section.setAttribute('outer', {
+                toString() {
+                    section.setAttribute('nested', 'yes');
+                    return 'outer';
+                }
+            });
+            if (section.getAttribute('nested') !== 'yes' || section.getAttribute('outer') !== 'outer') {
+                throw new Error('reentrant setAttribute did not write both attributes');
+            }
             return root instanceof HTMLElement && list.firstChild === item && button.disabled &&
                 button.id === 'action' && label.htmlFor === 'action' && label.getAttribute('for') === 'action' &&
                 item.className === 'task' && item.getAttribute('class') === 'task';

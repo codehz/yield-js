@@ -9,7 +9,7 @@ use yield_binding_macros::{host_class, methods};
 use yield_vm::intrinsics::TypeError;
 use yield_vm::{ClassCx, JsError, JsResult, JsValue, This};
 
-use super::{Dom, base_node_index, element::HTMLElement};
+use super::{Dom, element::HTMLElement};
 
 #[host_class(tag = "HTMLInputElement", parent = HTMLElement, methods, services = [dom: Rc<RefCell<Dom>>])]
 pub(super) struct HTMLInputElement;
@@ -18,8 +18,7 @@ pub(super) struct HTMLInputElement;
 impl HTMLInputElement {
     #[get(name = "checked")]
     fn checked(cx: &mut ClassCx<'_, '_, Self>, this: This<Self>) -> JsResult<JsValue> {
-        let wrapper = this.instance().value(cx);
-        let index = base_node_index(cx, &wrapper)?;
+        let index = receiver_index!(cx, this)?;
         let dom = Self::dom(cx.services()).borrow();
         let element = dom.node(index)?.element_data().unwrap();
         Ok(JsValue::boolean(checkbox_checked(element)))
@@ -31,8 +30,7 @@ impl HTMLInputElement {
         this: This<Self>,
         value: JsValue,
     ) -> JsResult<()> {
-        let wrapper = this.instance().value(cx);
-        let index = base_node_index(cx, &wrapper)?;
+        let index = receiver_index!(cx, this)?;
         let mut dom = Self::dom(cx.services()).borrow_mut();
         let node = dom.node(index)?;
         if is_checkbox(node.element_data().unwrap()) {
@@ -45,8 +43,7 @@ impl HTMLInputElement {
 
     #[get(name = "defaultChecked")]
     fn default_checked(cx: &mut ClassCx<'_, '_, Self>, this: This<Self>) -> JsResult<JsValue> {
-        let wrapper = this.instance().value(cx);
-        let index = base_node_index(cx, &wrapper)?;
+        let index = receiver_index!(cx, this)?;
         let dom = Self::dom(cx.services()).borrow();
         Ok(JsValue::boolean(
             dom.node(index)?.attr(local_name!("checked")).is_some(),
@@ -59,8 +56,7 @@ impl HTMLInputElement {
         this: This<Self>,
         value: JsValue,
     ) -> JsResult<()> {
-        let wrapper = this.instance().value(cx);
-        let index = base_node_index(cx, &wrapper)?;
+        let index = receiver_index!(cx, this)?;
         let mut dom = Self::dom(cx.services()).borrow_mut();
         let id = dom.node(index)?.id;
         dom.mutate_checked_attribute(id, value.truthy().then_some(""));
@@ -69,8 +65,7 @@ impl HTMLInputElement {
 
     #[get(name = "value")]
     fn value(cx: &mut ClassCx<'_, '_, Self>, this: This<Self>) -> JsResult<JsValue> {
-        let wrapper = this.instance().value(cx);
-        let index = base_node_index(cx, &wrapper)?;
+        let index = receiver_index!(cx, this)?;
         let dom = Self::dom(cx.services()).borrow();
         let element = dom.node(index)?.element_data().unwrap();
         Ok(match element.text_input_data() {
@@ -90,8 +85,7 @@ impl HTMLInputElement {
 
     #[set(name = "value")]
     fn set_value(cx: &mut ClassCx<'_, '_, Self>, this: This<Self>, value: JsValue) -> JsResult<()> {
-        let wrapper = this.instance().value(cx);
-        let index = base_node_index(cx, &wrapper)?;
+        let index = receiver_index!(cx, this)?;
         let value = cx.string(&value)?.to_string();
         let mut dom = Self::dom(cx.services()).borrow_mut();
         let id = dom.node(index)?.id;
@@ -109,8 +103,7 @@ impl HTMLInputElement {
         this: This<Self>,
         value: JsValue,
     ) -> JsResult<()> {
-        let wrapper = this.instance().value(cx);
-        let index = base_node_index(cx, &wrapper)?;
+        let index = receiver_index!(cx, this)?;
         let value = cx.string(&value)?.to_string();
         let mut dom = Self::dom(cx.services()).borrow_mut();
         let id = dom.node(index)?.id;
@@ -142,8 +135,7 @@ impl HTMLInputElement {
 
     #[get(name = "defaultValue")]
     fn default_value(cx: &mut ClassCx<'_, '_, Self>, this: This<Self>) -> JsResult<JsValue> {
-        let wrapper = this.instance().value(cx);
-        let index = base_node_index(cx, &wrapper)?;
+        let index = receiver_index!(cx, this)?;
         let dom = Self::dom(cx.services()).borrow();
         Ok(JsValue::string(
             dom.node(index)?.attr(local_name!("value")).unwrap_or(""),

@@ -7,11 +7,7 @@ use yield_vm::{JsError, JsResult, JsValue};
 
 use super::Dom;
 use super::document::{Document, DocumentSlots};
-use super::element::{
-    Element, HTMLButtonElement, HTMLElement, HTMLIFrameElement, HTMLLIElement, HTMLLabelElement,
-    HTMLUListElement, alloc_element,
-};
-use super::input::HTMLInputElement;
+use super::element::{Element, alloc_element, alloc_html_element};
 use super::node::{Node, NodeSlots};
 
 impl Dom {
@@ -62,15 +58,7 @@ impl Dom {
                 .map_err(|_| JsError::new::<TypeError>("too many DOM nodes"))?;
             let value = match &self.doc.get_node(id).expect("collected live ancestor").data {
                 NodeData::Element(element) if element.name.ns == ns!(html) => {
-                    match element.name.local.as_ref() {
-                        "iframe" => alloc_element(cx, HTMLIFrameElement)?.value(cx),
-                        "input" => alloc_element(cx, HTMLInputElement)?.value(cx),
-                        "button" => alloc_element(cx, HTMLButtonElement)?.value(cx),
-                        "label" => alloc_element(cx, HTMLLabelElement)?.value(cx),
-                        "ul" => alloc_element(cx, HTMLUListElement)?.value(cx),
-                        "li" => alloc_element(cx, HTMLLIElement)?.value(cx),
-                        _ => alloc_element(cx, HTMLElement)?.value(cx),
-                    }
+                    alloc_html_element(cx, element.name.local.as_ref())?
                 }
                 NodeData::Element(_) => alloc_element(cx, Element)?.value(cx),
                 NodeData::Text(_) | NodeData::Comment { .. } => cx.alloc(Node)?.value(cx),

@@ -1,7 +1,32 @@
 //! `yield:dom` host module: DOM node wrappers bound to the Blitz document.
 //!
-//! Each class file keeps one host class; `resolver.rs` holds the shared
-//! `Dom` helpers that map between node ids and JS handle instances.
+//! `resolver.rs` holds the shared `Dom` helpers that map between node ids
+//! and JS handle instances.
+
+// Rows are (HTML tag, Rust class, JS name, constructor, declaration mode).
+// Consumers capture JS names as `tt` so attribute macros see bare string literals.
+macro_rules! html_elements {
+    ($consumer:ident $($extra:tt)*) => {
+        $consumer! {
+            {
+                ("iframe", HTMLIFrameElement, "HTMLIFrameElement", construct_iframe, plain),
+                ("input", HTMLInputElement, "HTMLInputElement", construct_input, custom),
+                ("button", HTMLButtonElement, "HTMLButtonElement", construct_button, plain),
+                ("label", HTMLLabelElement, "HTMLLabelElement", construct_label, plain),
+                ("ul", HTMLUListElement, "HTMLUListElement", construct_ul, plain),
+                ("li", HTMLLIElement, "HTMLLIElement", construct_li, plain),
+            }
+            $($extra)*
+        }
+    };
+}
+
+macro_rules! receiver_index {
+    ($cx:ident, $this:ident) => {{
+        let wrapper = $this.instance().value($cx);
+        super::base_node_index($cx, &wrapper)
+    }};
+}
 
 mod document;
 mod element;
