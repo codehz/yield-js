@@ -18,8 +18,8 @@ use blitz_html::HtmlDocument;
 use yield_binding_macros::host;
 use yield_compiler::{Compiler, LoadedModule, MemoryResolver, NodeResolver, Project};
 use yield_vm::{
-    Absent, Build, BuildResource, Diagnostic, Diagnostics, Host, JsValue, RestoreOptions, Snapshot,
-    Value, Vm, VmError,
+    Absent, Build, BuildResource, Diagnostic, Diagnostics, Host, JsValue, ObjectId, RestoreOptions,
+    Snapshot, Value, Vm, VmError,
 };
 
 const SHELL: &str = "<!doctype html><html><head></head><body><div id=\"root\"></div></body></html>";
@@ -45,7 +45,11 @@ impl UserEvent {
 
 struct Dom {
     doc: BaseDocument,
-    nodes: Vec<NodeId>,
+    // Identity is absent only while the native tree is being restored.
+    nodes: BTreeMap<u32, (NodeId, Option<ObjectId>)>,
+    next_handle: u32,
+    detached: BTreeSet<NodeId>,
+    snapshot_image: RefCell<Option<Result<snapshot::DomImage, yield_vm::binding::CodecError>>>,
     handles: BTreeMap<NodeId, u32>,
     dirty_checkboxes: BTreeSet<NodeId>,
     pending_event: Option<(UserEvent, NodeId)>,
@@ -56,7 +60,10 @@ impl Dom {
     fn new(resources: &[BuildResource]) -> Self {
         Self {
             doc: HtmlDocument::from_html(SHELL, document_config()).into_inner(),
-            nodes: Vec::new(),
+            nodes: BTreeMap::new(),
+            next_handle: 0,
+            detached: BTreeSet::new(),
+            snapshot_image: RefCell::new(None),
             handles: BTreeMap::new(),
             dirty_checkboxes: BTreeSet::new(),
             pending_event: None,
@@ -67,7 +74,10 @@ impl Dom {
     fn empty(resources: &[BuildResource]) -> Self {
         Self {
             doc: BaseDocument::new(document_config()),
-            nodes: Vec::new(),
+            nodes: BTreeMap::new(),
+            next_handle: 0,
+            detached: BTreeSet::new(),
+            snapshot_image: RefCell::new(None),
             handles: BTreeMap::new(),
             dirty_checkboxes: BTreeSet::new(),
             pending_event: None,
@@ -150,6 +160,7 @@ pub struct BlitzSession {
     dom: Rc<RefCell<Dom>>,
     diagnostics: Rc<RenderDiagnostics>,
     timers: timer::Timers,
+    automatic_gc_at: Option<u64>,
 }
 
 impl BlitzSession {
@@ -169,6 +180,27 @@ impl BlitzSession {
         let mut session = Self::with_dom(Dom::empty(&build.resources), |host| {
             Vm::restore(snapshot, build, host, options)
         })?;
+        {
+            let mut dom = session.dom.borrow_mut();
+            for (object, value) in session
+                .vm
+                .host_instance_slots::<dom::Node>(dom::NODE_INDEX_SLOT)
+            {
+                let yield_vm::ValueRef::Number(index) = value.view() else {
+                    continue;
+                };
+                let handle = index as u32;
+                let Some((_, identity)) = dom.nodes.get_mut(&handle) else {
+                    return Err("missing restored DOM node handle".into());
+                };
+                if index != f64::from(handle) || identity.replace(object).is_some() {
+                    return Err("invalid restored DOM node handle".into());
+                }
+            }
+            if dom.nodes.values().any(|(_, identity)| identity.is_none()) {
+                return Err("missing restored DOM wrapper".into());
+            }
+        }
         session
             .diagnostics
             .check(session.vm.start_recovered_operations())?;
@@ -197,6 +229,7 @@ impl BlitzSession {
             dom,
             diagnostics,
             timers,
+            automatic_gc_at: None,
         })
     }
 
@@ -269,7 +302,34 @@ impl BlitzSession {
 
     /// Capture the VM and DOM state together.
     pub fn snapshot(&self, roots: &[Value]) -> Result<Snapshot, String> {
-        self.vm.snapshot(roots).map_err(|error| error.to_string())
+        let dom = self.dom.borrow();
+        let result = self.vm.snapshot_with_live_objects(roots, |live| {
+            dom.snapshot_image
+                .replace(Some(snapshot::DomImage::capture(&dom, live)));
+        });
+        dom.snapshot_image.take();
+        result.map_err(|error| error.to_string())
+    }
+
+    /// Enable periodic idle collection. The caller must not retain unrooted
+    /// VM values across idle checkpoints. Disabled by default for embedders.
+    pub fn enable_automatic_gc(&mut self) {
+        self.automatic_gc_at = Some(self.vm.allocation_totals().0);
+    }
+
+    /// Collect unreachable VM values and detached DOM trees. Call between VM
+    /// turns with drained microtasks and pass any VM values you will reuse.
+    pub fn collect_garbage(&mut self, roots: &[Value]) -> Result<(), String> {
+        self.vm
+            .collect_garbage(roots)
+            .map_err(|error| error.to_string())?;
+        self.dom
+            .borrow_mut()
+            .sweep(|object| self.vm.has_host_instance(object));
+        if self.automatic_gc_at.is_some() {
+            self.automatic_gc_at = Some(self.vm.allocation_totals().0);
+        }
+        Ok(())
     }
 
     /// Inspect the DOM without bypassing its script bindings.
@@ -292,6 +352,12 @@ impl BlitzSession {
         loop {
             self.diagnostics.check(self.vm.run_until_idle())?;
             let Some(token) = self.timers.due() else {
+                if self
+                    .automatic_gc_at
+                    .is_some_and(|last| self.vm.allocation_totals().0.saturating_sub(last) >= 1024)
+                {
+                    self.collect_garbage(&[])?;
+                }
                 return Ok(woke);
             };
             self.diagnostics.check(self.vm.wake_timer(token))?;

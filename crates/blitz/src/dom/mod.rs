@@ -132,6 +132,9 @@ pub(crate) use input::{
 pub use module::DomModule;
 pub(crate) use node::Node;
 
+// Declaration-local slot number of `Node::index`.
+pub(crate) const NODE_INDEX_SLOT: usize = 0;
+
 /// Resolve the numeric node index stored on a `Node` instance slot.
 pub(super) fn node_index(cx: &mut CallCx<'_>, node: Instance<Node>) -> JsResult<u32> {
     let Some(index) = node.index(cx)?.as_number() else {

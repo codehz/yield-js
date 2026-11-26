@@ -3,10 +3,9 @@
 use blitz_dom::{NodeData, NodeId, ns};
 use yield_vm::binding::CallCx;
 use yield_vm::intrinsics::TypeError;
-use yield_vm::{JsError, JsResult, JsValue};
+use yield_vm::{Instance, JsError, JsResult, JsValue, ObjectId};
 
 use super::Dom;
-use super::document::{Document, DocumentSlots};
 use super::element::{Element, alloc_element, alloc_html_element};
 use super::node::{Node, NodeSlots};
 
@@ -14,9 +13,25 @@ impl Dom {
     /// Resolve a handle index to the Blitz node it wraps.
     pub(crate) fn node(&self, index: u32) -> JsResult<&blitz_dom::Node> {
         self.nodes
-            .get(index as usize)
-            .and_then(|id| self.doc.get_node(*id))
+            .get(&index)
+            .and_then(|&(id, _)| self.doc.get_node(id))
             .ok_or_else(|| JsError::new::<TypeError>("invalid DOM node handle"))
+    }
+
+    pub(super) fn wrapper(
+        &self,
+        cx: &mut CallCx<'_>,
+        id: NodeId,
+    ) -> JsResult<Option<Instance<Node>>> {
+        self.handles
+            .get(&id)
+            .map(|index| {
+                let object = self.nodes[index]
+                    .1
+                    .ok_or_else(|| JsError::fault("missing DOM wrapper identity"))?;
+                cx.instance_by_identity(object)
+            })
+            .transpose()
     }
 
     /// Resolve a Blitz node id to a JS handle, creating (and caching) the
@@ -30,9 +45,8 @@ impl Dom {
         let Some(id) = id else {
             return Ok(JsValue::null());
         };
-        let document = cx.instance::<Document>(&owner)?;
-        if let Some(&index) = self.handles.get(&id) {
-            return document.nodes_get(cx, index as usize);
+        if let Some(node) = self.wrapper(cx, id)? {
+            return Ok(node.value(cx));
         }
 
         // Intern missing ancestors first so even the shell's original nodes
@@ -43,8 +57,8 @@ impl Dom {
             let Some(id) = current else {
                 break JsValue::null();
             };
-            if let Some(&index) = self.handles.get(&id) {
-                break document.nodes_get(cx, index as usize)?;
+            if let Some(node) = self.wrapper(cx, id)? {
+                break node.value(cx);
             }
             let node = self
                 .doc
@@ -54,8 +68,10 @@ impl Dom {
             current = node.parent;
         };
         for id in missing.into_iter().rev() {
-            let index = u32::try_from(self.nodes.len())
-                .map_err(|_| JsError::new::<TypeError>("too many DOM nodes"))?;
+            let index = self.next_handle;
+            if index == u32::MAX {
+                return Err(JsError::new::<TypeError>("too many DOM nodes"));
+            }
             let value = match &self.doc.get_node(id).expect("collected live ancestor").data {
                 NodeData::Element(element) if element.name.ns == ns!(html) => {
                     alloc_html_element(cx, element.name.local.as_ref())?
@@ -65,19 +81,54 @@ impl Dom {
                 _ => return Err(JsError::new::<TypeError>("unsupported DOM node kind")),
             };
             init_node(cx, &value, index, owner.clone())?;
-            cx.instance::<Node>(&value)?.set_event_parent(cx, parent)?;
-            document.nodes_push(cx, value.clone())?;
-            self.publish_node(id, index);
+            let wrapper = cx.instance::<Node>(&value)?;
+            if !parent.is_null() {
+                cx.instance::<Node>(&parent)?
+                    .wrapped_children_push(cx, value.clone())?;
+            }
+            wrapper.set_event_parent(cx, parent)?;
+            self.publish_node(id, index, wrapper.identity() as ObjectId);
             parent = value;
         }
         Ok(parent)
     }
 
     /// Cache a freshly created node id at the next handle index.
-    pub(crate) fn publish_node(&mut self, id: NodeId, index: u32) {
-        debug_assert_eq!(self.nodes.len(), index as usize);
-        self.nodes.push(id);
+    pub(crate) fn publish_node(&mut self, id: NodeId, index: u32, object: ObjectId) {
+        debug_assert_eq!(self.next_handle, index);
+        self.next_handle += 1;
+        self.nodes.insert(index, (id, Some(object)));
         self.handles.insert(id, index);
+    }
+
+    pub(crate) fn sweep(&mut self, is_live: impl Fn(ObjectId) -> bool) {
+        let handles = &mut self.handles;
+        self.nodes.retain(|_, (id, object)| {
+            let live = object.is_some_and(&is_live);
+            if !live {
+                handles.remove(id);
+            }
+            live
+        });
+        // Every wrapped node has a wrapper for each ancestor. Only a live
+        // wrapper at a detached root can keep that component alive.
+        let Self {
+            doc,
+            handles,
+            dirty_checkboxes,
+            detached,
+            ..
+        } = self;
+        let mut mutation = doc.mutate();
+        detached.retain(|id| {
+            if handles.contains_key(id) {
+                return true;
+            }
+            mutation.remove_node_if_unparented_with(*id, &mut |id| {
+                dirty_checkboxes.remove(&id);
+            });
+            false
+        });
     }
 }
 

@@ -18,7 +18,14 @@ pub(crate) struct Node {
     owner: JsValue,
     #[js_slot]
     event_parent: JsValue,
+    // Parent/child cycles keep all wrappers in a live native component alive.
+    // Neither these edges nor the native identity cache root a detached tree.
+    #[js_list]
+    wrapped_children: Vec<JsValue>,
 }
+
+// Local slot number in the Node declaration above (before subclass slots).
+const WRAPPED_CHILDREN_SLOT: usize = 3;
 
 #[methods(Node)]
 impl Node {
@@ -121,18 +128,19 @@ impl Node {
             ));
         }
         if !is_text {
-            use super::document::{Document, DocumentSlots};
-            let owner = this.owner(cx)?;
-            let document = cx.instance::<Document>(&owner)?;
-            for child in &node.children {
-                if let Some(&index) = dom.handles.get(child) {
-                    let wrapper = document.nodes_get(cx, index as usize)?;
-                    cx.instance::<Node>(&wrapper)?
-                        .set_event_parent(cx, JsValue::null())?;
+            for &child in &node.children {
+                if let Some(wrapper) = dom.wrapper(cx, child)? {
+                    wrapper.set_event_parent(cx, JsValue::null())?;
                 }
             }
+            this.wrapped_children_clear(cx)?;
         }
         let mut mutation = dom.doc.mutate();
+        let detached = if is_text {
+            Default::default()
+        } else {
+            mutation.child_ids(id)
+        };
         if is_text {
             mutation.set_node_text(id, &value);
         } else if value.is_empty() {
@@ -141,6 +149,8 @@ impl Node {
             let text = mutation.create_text_node(&value);
             mutation.replace_children(id, &[text]);
         }
+        drop(mutation);
+        dom.detached.extend(detached);
         Ok(())
     }
 
@@ -217,8 +227,11 @@ impl Node {
             if child_node.parent != Some(parent_id) {
                 return Err(JsError::new::<TypeError>("node is not a direct child"));
             }
+            this.instance()
+                .list_remove_instance(cx, WRAPPED_CHILDREN_SLOT, child_wrapper)?;
             child_wrapper.set_event_parent(cx, JsValue::null())?;
             dom.doc.mutate().remove_node(child_id);
+            dom.detached.insert(child_id);
             return Ok(child);
         }
         if !matches!(parent.data, NodeData::Element(_)) {
@@ -252,14 +265,26 @@ impl Node {
             }
             ancestor = node.parent.and_then(|id| dom.doc.get_node(id));
         }
-        let parent_wrapper = this.instance().value(cx);
-        child_wrapper.set_event_parent(cx, parent_wrapper)?;
+        let previous_parent = child_node.parent;
+        if previous_parent != Some(parent_id) {
+            if let Some(previous) = previous_parent {
+                let previous = dom
+                    .wrapper(cx, previous)?
+                    .ok_or_else(|| JsError::fault("missing DOM parent wrapper"))?;
+                previous.list_remove_instance(cx, WRAPPED_CHILDREN_SLOT, child_wrapper)?;
+            }
+            this.wrapped_children_push(cx, child.clone())?;
+            let parent_wrapper = this.instance().value(cx);
+            child_wrapper.set_event_parent(cx, parent_wrapper)?;
+        }
         let mut mutation = dom.doc.mutate();
         if let Some(reference) = reference {
             mutation.insert_nodes_before(reference, &[child_id]);
         } else {
             mutation.append_children(parent_id, &[child_id]);
         }
+        drop(mutation);
+        dom.detached.remove(&child_id);
         Ok(child)
     }
 }

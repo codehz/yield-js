@@ -141,9 +141,8 @@ html_elements! {
         let value = document.value(cx);
         init_node(cx, &value, 0, value.clone())?;
         document.set_window(cx, window)?;
-        document.nodes_push(cx, value.clone())?;
         cx.set_state_slot(Self::SLOT_DOCUMENT, value.clone())?;
-        dom.publish_node(id, 0);
+        dom.publish_node(id, 0, document.identity() as yield_vm::ObjectId);
         Ok(value)
     }
 }

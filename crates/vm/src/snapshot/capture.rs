@@ -37,7 +37,7 @@ impl VmCore {
         host: &Host<P>,
         roots: &[Value],
     ) -> Result<Snapshot, VmError> {
-        self.capture_image(host, roots, |_| {})
+        self.capture_image(host, roots, |_| {}, |_| {})
     }
 
     /// Capture through the same path as `snapshot`, timing its phases.
@@ -52,22 +52,28 @@ impl VmCore {
         let start = Instant::now();
         let mut last = start;
         let mut profile = crate::perf::Capture::default();
-        let snapshot = self.capture_image(host, roots, |field| {
-            let now = Instant::now();
-            *field(&mut profile) += now.duration_since(last);
-            last = now;
-        })?;
+        let snapshot = self.capture_image(
+            host,
+            roots,
+            |field| {
+                let now = Instant::now();
+                *field(&mut profile) += now.duration_since(last);
+                last = now;
+            },
+            |_| {},
+        )?;
         let end = Instant::now();
         profile.records += end.duration_since(last);
         profile.total = end.duration_since(start);
         Ok((snapshot, profile))
     }
 
-    fn capture_image<P: PlatformServices>(
+    pub(crate) fn capture_image<P: PlatformServices>(
         &self,
         host: &Host<P>,
         roots: &[Value],
         mut checkpoint: impl FnMut(fn(&mut crate::perf::Capture) -> &mut std::time::Duration),
+        prepare: impl FnOnce(&std::collections::BTreeSet<crate::ObjectId>),
     ) -> Result<Snapshot, VmError> {
         let bindings = host.bindings();
         if self.has_pending_subtle_operations() {
@@ -93,6 +99,7 @@ impl VmCore {
             ));
         }
         checkpoint(|profile| &mut profile.trace);
+        prepare(&live.objects);
 
         let mut snapshot = Snapshot::new(self.build.build_id.clone());
         snapshot.elapsed = self.clock.elapsed();

@@ -15,6 +15,7 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), String> {
     let mut session = yield_blitz::BlitzSession::new(yield_blitz::compile_fixture()?)?;
+    session.enable_automatic_gc();
     session.run_until_idle()?;
     let event_loop = create_default_event_loop();
     let (proxy, receiver) = BlitzShellProxy::new(event_loop.create_proxy());

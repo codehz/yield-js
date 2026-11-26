@@ -12,8 +12,6 @@ use super::base_node_index;
 
 #[host_class(tag = "Document", parent = Node, methods, services = [dom: Rc<RefCell<Dom>>])]
 pub(super) struct Document {
-    #[js_list]
-    nodes: Vec<JsValue>,
     #[js_slot]
     window: JsValue,
 }
@@ -98,6 +96,7 @@ impl Document {
         let name = QualName::new(None, ns!(html), LocalName::from(tag));
         let mut dom = Self::dom(cx.services()).borrow_mut();
         let id = dom.doc.mutate().create_element(name, Vec::new());
+        dom.detached.insert(id);
         dom.resolve_node(cx, owner, Some(id))
     }
 
@@ -111,6 +110,7 @@ impl Document {
         let value = cx.string(&value)?.to_string();
         let mut dom = Self::dom(cx.services()).borrow_mut();
         let id = dom.doc.mutate().create_text_node(&value);
+        dom.detached.insert(id);
         dom.resolve_node(cx, owner, Some(id))
     }
 }

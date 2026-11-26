@@ -333,6 +333,101 @@ fn deliver_blitz_click(session: &mut BlitzSession, target: NodeId) {
 }
 
 #[test]
+fn idle_collection_reclaims_repeated_text_replacements() -> Result<(), String> {
+    let build = compile_module(
+        r#"
+        const root = document.getElementById('root');
+        root.textContent = 'first';
+        root.firstChild.marker = 42;
+        export function churn() {
+            for (let i = 0; i < 1100; i++) {
+                document.createElement('span');
+                root.textContent = 'current';
+            }
+        }
+        export function check() { return root.textContent === 'current'; }
+    "#,
+    )?;
+    let mut session = BlitzSession::new(build)?;
+    session.enable_automatic_gc();
+    let old_text = {
+        let doc = session.document();
+        doc.get_node(doc.get_element_by_id("root").unwrap())
+            .unwrap()
+            .children[0]
+    };
+    session.start("churn", vec![])?;
+    session.run_until_idle()?;
+    assert!(session.document().get_node(old_text).is_none());
+    assert_eq!(session.start("check", vec![])?, Value::boolean(true));
+    Ok(())
+}
+
+#[test]
+fn collects_detached_dom_after_the_last_root_is_released() -> Result<(), String> {
+    let build = compile_module(
+        r#"
+        const root = document.getElementById('root');
+        let leaf;
+        let calls = 0;
+        export function attach() {
+            const branch = document.createElement('section');
+            branch.setAttribute('id', 'branch');
+            const sibling = document.createElement('span');
+            sibling.marker = { value: 42 };
+            sibling.addEventListener('probe', () => { calls++; });
+            leaf = document.createElement('p');
+            branch.appendChild(leaf);
+            branch.appendChild(sibling);
+            root.appendChild(branch);
+        }
+        export function detach() { root.removeChild(leaf.parentNode); }
+        export function verify() {
+            const branch = leaf.parentNode;
+            const sibling = leaf.nextSibling;
+            sibling.dispatchEvent(new Event('probe'));
+            root.appendChild(branch);
+            return branch.firstChild === leaf && leaf.nextSibling === sibling &&
+                document.getElementById('branch') === branch &&
+                sibling.marker.value === 42 && calls === 1;
+        }
+        export function release() {
+            detach();
+            const retained = leaf;
+            leaf = null;
+            return retained;
+        }
+    "#,
+    )?;
+    let mut session = BlitzSession::new(build.clone())?;
+    session.start("attach", vec![])?;
+    session.start("detach", vec![])?;
+    session.collect_garbage(&[])?;
+    let snapshot = session.snapshot(&[])?;
+    let mut restored = BlitzSession::restore(
+        snapshot,
+        build,
+        RestoreOptions {
+            validation: SnapshotValidation::Full,
+            ..Default::default()
+        },
+    )?;
+    assert_eq!(restored.start("verify", vec![])?, Value::boolean(true));
+    let branch = restored.document().get_element_by_id("branch").unwrap();
+    let leaf = restored.document().get_node(branch).unwrap().children[0];
+    let retained = restored.start("release", vec![])?;
+    restored.collect_garbage(&[retained])?;
+    assert!(restored.document().get_node(leaf).is_some());
+    let dead = restored.snapshot(&[])?.to_bytes()?;
+    assert!(restored.document().get_node(leaf).is_some());
+    restored.collect_garbage(&[])?;
+    assert!(restored.document().get_node(branch).is_none());
+    assert!(restored.document().get_node(leaf).is_none());
+    assert_eq!(restored.snapshot(&[])?.to_bytes()?.len(), dead.len());
+    Ok(())
+}
+
+#[test]
 fn keeps_native_node_identity_and_mutates_the_tree() -> Result<(), String> {
     let doc = render_module(
         r#"

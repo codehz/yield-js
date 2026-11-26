@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use blitz_dom::{Attribute, BaseDocument, NodeData, NodeId, QualName};
 use yield_vm::binding::CodecError;
-use yield_vm::{Decode, Encode, Services};
+use yield_vm::{Decode, Encode, ObjectId, Services};
 
 use super::Dom;
 use super::dom::DomModule;
@@ -13,7 +13,7 @@ use super::dom::{
     checkbox_checked, is_checkbox, is_text_input, write_checkbox_checked, write_input_value,
 };
 
-const VERSION: u8 = 3;
+const VERSION: u8 = 4;
 
 /// The live tree belongs to the host; capture and restore use the current service.
 #[derive(Default)]
@@ -25,7 +25,11 @@ impl Encode<DomModule> for DomState {
         out: &mut Vec<u8>,
         services: &Services<'_, DomModule>,
     ) -> Result<(), CodecError> {
-        let image = DomImage::capture(&DomModule::dom(services).borrow())?;
+        let image = DomModule::dom(services)
+            .borrow()
+            .snapshot_image
+            .take()
+            .ok_or_else(|| CodecError::new("missing prepared DOM snapshot image"))??;
         VERSION.encode(out, services)?;
         image.encode(out, services)
     }
@@ -46,9 +50,16 @@ impl Decode<DomModule> for DomState {
 }
 
 #[derive(Encode, Decode)]
-struct DomImage {
+pub(super) struct DomImage {
     nodes: Vec<NodeRecord>,
-    wrappers: Vec<u32>,
+    wrappers: Vec<WrapperRecord>,
+    next_handle: u32,
+}
+
+#[derive(Encode, Decode)]
+struct WrapperRecord {
+    handle: u32,
+    node: u32,
 }
 
 #[derive(Encode, Decode)]
@@ -137,11 +148,17 @@ impl<Owner> Decode<Owner> for NodeKind {
 }
 
 impl DomImage {
-    fn capture(dom: &Dom) -> Result<Self, CodecError> {
+    pub(super) fn capture(dom: &Dom, live: &BTreeSet<ObjectId>) -> Result<Self, CodecError> {
+        let wrappers = || {
+            dom.nodes
+                .iter()
+                .filter(|(_, (_, object))| object.is_some_and(|id| live.contains(&id)))
+        };
+        let wrapped_nodes = wrappers().map(|(_, &(id, _))| id);
         let mut nodes = Vec::new();
         let mut ids = BTreeMap::new();
         let mut stack = Vec::new();
-        for start in std::iter::once(dom.doc.root_node().id).chain(dom.nodes.iter().copied()) {
+        for start in std::iter::once(dom.doc.root_node().id).chain(wrapped_nodes) {
             if ids.contains_key(&start) {
                 continue;
             }
@@ -204,8 +221,17 @@ impl DomImage {
                 );
             }
         }
-        let wrappers = dom.nodes.iter().map(|id| ids[id]).collect();
-        Ok(Self { nodes, wrappers })
+        let wrappers = wrappers()
+            .map(|(&handle, &(id, _))| WrapperRecord {
+                handle,
+                node: ids[&id],
+            })
+            .collect();
+        Ok(Self {
+            nodes,
+            wrappers,
+            next_handle: dom.next_handle,
+        })
     }
 
     fn validate(&self) -> Result<(), CodecError> {
@@ -232,13 +258,20 @@ impl DomImage {
             }
         }
         let mut wrappers = BTreeSet::new();
-        if self.wrappers.first().is_some_and(|&id| id != 0)
-            || self
-                .wrappers
-                .iter()
-                .any(|&id| id as usize >= self.nodes.len() || !wrappers.insert(id))
-        {
-            return Err(CodecError::new("invalid DOM snapshot wrapper table"));
+        let mut last_handle = None;
+        for wrapper in &self.wrappers {
+            if (wrapper.handle == 0) != (wrapper.node == 0)
+                || wrapper.handle >= self.next_handle
+                || last_handle.is_some_and(|last| last >= wrapper.handle)
+                || wrapper.node as usize >= self.nodes.len()
+                || !wrappers.insert(wrapper.node)
+            {
+                return Err(CodecError::new("invalid DOM snapshot wrapper table"));
+            }
+            last_handle = Some(wrapper.handle);
+        }
+        if self.next_handle != 0 && !wrappers.contains(&0) {
+            return Err(CodecError::new("missing DOM document wrapper"));
         }
         Ok(())
     }
@@ -310,17 +343,16 @@ impl DomImage {
             write_checkbox_checked(&mut dom.doc, id, checked);
             dom.dirty_checkboxes.insert(id);
         }
-        dom.nodes = self
-            .wrappers
-            .into_iter()
-            .map(|index| ids[index as usize])
-            .collect();
-        dom.handles = dom
-            .nodes
-            .iter()
-            .enumerate()
-            .map(|(index, &id)| (id, index as u32))
-            .collect();
+        dom.next_handle = self.next_handle;
+        for wrapper in self.wrappers {
+            let id = ids[wrapper.node as usize];
+            dom.nodes.insert(wrapper.handle, (id, None));
+            dom.handles.insert(id, wrapper.handle);
+        }
+        let doc = &dom.doc;
+        dom.detached.extend(ids.into_iter().filter(|&id| {
+            id != root && doc.get_node(id).is_some_and(|node| node.parent.is_none())
+        }));
         Ok(())
     }
 }

@@ -475,6 +475,49 @@ impl<P: PlatformServices> Vm<P> {
         self.core.collect_garbage(roots)
     }
 
+    /// Whether the VM still contains the host instance with this local identity.
+    pub fn has_host_instance(&self, id: crate::ObjectId) -> bool {
+        self.core.host_instances.contains_key(&id)
+    }
+
+    /// Iterate the single JS slot of each instance of a host class, including subclasses.
+    #[doc(hidden)]
+    pub fn host_instance_slots<C: crate::HostClass>(
+        &self,
+        local_slot: usize,
+    ) -> impl Iterator<Item = (crate::ObjectId, &Value)> + '_ {
+        let bindings = self.host.bindings();
+        let slot = bindings.class_by_tag(C::TAG).and_then(|class| {
+            bindings
+                .class_slot_base(class)
+                .checked_add(local_slot)
+                .map(|slot| (class, slot))
+        });
+        self.core
+            .host_instances
+            .iter()
+            .filter_map(move |(&object, instance)| {
+                let (class, slot) = slot?;
+                if !bindings.class_is_a(instance.class, class) {
+                    return None;
+                }
+                match instance.slots.get(slot)? {
+                    crate::runtime::HostSlot::Js(value) => Some((object, value)),
+                    crate::runtime::HostSlot::JsList(_) => None,
+                }
+            })
+    }
+
+    /// Capture a snapshot, exposing its live object identities before payload encoding.
+    #[doc(hidden)]
+    pub fn snapshot_with_live_objects(
+        &self,
+        roots: &[Value],
+        prepare: impl FnOnce(&std::collections::BTreeSet<crate::ObjectId>),
+    ) -> Result<Snapshot, VmError> {
+        self.core.capture_image(&self.host, roots, |_| {}, prepare)
+    }
+
     /// Monotonic allocation totals for host GC scheduling, read between VM
     /// calls. `objects` counts every allocation since VM creation; `bytes`
     /// counts the backing storage of byte buffers allocated in the same span.

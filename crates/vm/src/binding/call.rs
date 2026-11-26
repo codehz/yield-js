@@ -243,6 +243,31 @@ impl<T: HostClass> Instance<T> {
         cx.list_clear_value(self.id, index)
     }
 
+    /// Remove a host instance from an unordered managed list.
+    pub fn list_remove_instance<U: HostClass>(
+        &self,
+        cx: &mut CallCx<'_>,
+        index: usize,
+        value: Instance<U>,
+    ) -> JsResult<()> {
+        let index = cx.instance_slot::<T>(index)?;
+        let instance = cx
+            .vm
+            .host_instances
+            .get_mut(&self.id)
+            .ok_or_else(|| JsError::fault("value is not a host instance"))?;
+        let Some(crate::runtime::HostSlot::JsList(values)) = instance.slots.get_mut(index) else {
+            return Err(JsError::fault("slot is not a managed list"));
+        };
+        if let Some(position) = values
+            .iter()
+            .position(|item| *item == Value::object(value.id))
+        {
+            values.swap_remove(position);
+        }
+        Ok(())
+    }
+
     pub fn payload<'a>(&self, cx: &'a CallCx<'_>) -> JsResult<&'a T> {
         cx.payload_value::<T>(self.id)
     }
@@ -916,6 +941,11 @@ impl<'a> CallCx<'a> {
     pub fn instance<T: HostClass>(&mut self, value: &JsValue) -> JsResult<Instance<T>> {
         self.check_value(value)?;
         self.branded_instance(Self::instance_id(value))
+    }
+
+    /// Resolve a VM-local identity previously obtained from a host instance.
+    pub fn instance_by_identity<T: HostClass>(&mut self, id: ObjectId) -> JsResult<Instance<T>> {
+        self.branded_instance(Some(id))
     }
 
     fn instance_id(value: &JsValue) -> Option<ObjectId> {
