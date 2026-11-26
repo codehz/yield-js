@@ -10,7 +10,8 @@ use crate::{HostFault, Value};
 
 use super::{
     ConsoleEvent, ConsoleSink, CryptoService, Diagnostic, Diagnostics, GcRoots, PlatformServices,
-    SubtleCryptoRequest, SubtleCryptoService, TimeService, TimerService, UserAgent,
+    SubtleCryptoCompletion, SubtleCryptoRequest, SubtleCryptoService, TimeService, TimerService,
+    UserAgent,
 };
 
 /// The uninhabited service type for an unconfigured capability.
@@ -62,7 +63,7 @@ where
     D: Diagnostics + 'static,
     F: FetchService + 'static,
     G: GcRoots + 'static,
-    S: SubtleCryptoService + Clone + 'static,
+    S: SubtleCryptoService + 'static,
     T: TimeService + 'static,
     R: TimerService + 'static,
 {
@@ -123,8 +124,19 @@ service!(FetchService for Arc {
 });
 service!(GcRoots for Rc { fn visit(visit: &mut dyn FnMut(&Value)); });
 service!(SubtleCryptoService for Arc {
-    fn execute(request: SubtleCryptoRequest) -> Result<Vec<u8>, HostFault>;
+    fn start(request: SubtleCryptoRequest, completion: SubtleCryptoCompletion) -> Result<(), HostFault>;
 });
+
+impl<T: SubtleCryptoService + ?Sized> SubtleCryptoService for Rc<T> {
+    fn start(
+        &self,
+        request: SubtleCryptoRequest,
+        completion: SubtleCryptoCompletion,
+    ) -> Result<(), HostFault> {
+        (**self).start(request, completion)
+    }
+}
+
 service!(TimeService for Arc {
     fn now_ms() -> i64;
     fn time_zone() -> Cow<'_, str>;

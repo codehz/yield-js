@@ -1,9 +1,12 @@
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use yield_harness::{TestHost, build};
 use yield_vm::binding::{HostFault, JsValue};
 use yield_vm::{
-    CryptoService, PromiseState, RestoreOptions, Snapshot, SnapshotValidation, Value, Vm, VmError,
+    CryptoService, PlatformServices, PromiseState, RestoreOptions, Snapshot, SnapshotValidation,
+    SubtleCryptoCompletion, SubtleCryptoRequest, SubtleCryptoService, Value, Vm, VmError,
 };
 
 const CHECK_ERRORS: &str = r#"
@@ -156,14 +159,153 @@ export async function open() {
     );
 }
 
+// Intentionally neither Clone nor Send: the VM borrows the service on its own thread.
+struct HeldDigests(Rc<RefCell<Vec<SubtleCryptoCompletion>>>);
+
+impl SubtleCryptoService for HeldDigests {
+    fn start(
+        &self,
+        _: SubtleCryptoRequest,
+        completion: SubtleCryptoCompletion,
+    ) -> Result<(), HostFault> {
+        self.0.borrow_mut().push(completion);
+        Ok(())
+    }
+}
+
+fn held_digest_vm(
+    completions: Rc<RefCell<Vec<SubtleCryptoCompletion>>>,
+) -> Vm<impl PlatformServices> {
+    let host = yield_vm::host! { services: { subtle_crypto: HeldDigests(completions) } }.unwrap();
+    Vm::new(
+        super::support::compile_main(
+            r#"
+const results = [];
+export function digest(id) {
+    const promise = crypto.subtle.digest("SHA-256", new Uint8Array([id]));
+    promise.then(
+        bytes => { results[id] = new Uint8Array(bytes).toHex(); },
+        error => { results[id] = error instanceof DOMException ? error.name : "not a DOMException"; }
+    );
+    return promise;
+}
+export function result(id) { return results[id]; }
+"#,
+            &yield_compiler::Compiler::default(),
+        )
+        .unwrap(),
+        host,
+        Default::default(),
+    )
+    .unwrap()
+}
+
 #[test]
-fn subtle_pending_worker_blocks_snapshot_even_without_guest_roots() {
+fn subtle_delivers_ready_digest_before_an_earlier_pending_digest() {
+    let completions = Rc::new(RefCell::new(Vec::new()));
+    let mut vm = held_digest_vm(Rc::clone(&completions));
+    let a = vm.start("digest", vec![JsValue::number(0.0)]).unwrap();
+    let b = vm.start("digest", vec![JsValue::number(1.0)]).unwrap();
+    completions
+        .borrow_mut()
+        .remove(1)
+        .complete(Ok(vec![0xBB; 32]));
+    assert_eq!(vm.promise_state(&b).unwrap(), PromiseState::Pending);
+
+    vm.run_until_idle().unwrap();
+    assert_eq!(vm.promise_state(&a).unwrap(), PromiseState::Pending);
+    assert!(matches!(
+        vm.promise_state(&b).unwrap(),
+        PromiseState::Fulfilled(_)
+    ));
+    assert_eq!(
+        vm.start("result", vec![JsValue::number(1.0)]).unwrap(),
+        Value::string("bb".repeat(32).into())
+    );
+    assert!(vm.has_pending_subtle_operations());
+    assert!(matches!(
+        vm.snapshot(&[]),
+        Err(VmError::InvalidState(message)) if message.contains("pending SubtleCrypto operations")
+    ));
+
+    completions
+        .borrow_mut()
+        .remove(0)
+        .complete(Ok(vec![0xAA; 32]));
+    vm.run_until_idle().unwrap();
+    assert!(matches!(
+        vm.promise_state(&a).unwrap(),
+        PromiseState::Fulfilled(_)
+    ));
+    assert_eq!(
+        vm.start("result", vec![JsValue::number(0.0)]).unwrap(),
+        Value::string("aa".repeat(32).into())
+    );
+    assert!(!vm.has_pending_subtle_operations());
+}
+
+#[test]
+fn subtle_limits_pending_completions_and_releases_an_abandoned_slot() {
+    let completions = Rc::new(RefCell::new(Vec::new()));
+    let mut vm = held_digest_vm(Rc::clone(&completions));
+    let promises: Vec<_> = (0..17)
+        .map(|id| {
+            vm.start("digest", vec![JsValue::number(f64::from(id))])
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(completions.borrow().len(), 16);
+
+    vm.run_until_idle().unwrap();
+    assert!(matches!(
+        vm.promise_state(&promises[16]).unwrap(),
+        PromiseState::Rejected(_)
+    ));
+    assert_eq!(
+        vm.start("result", vec![JsValue::number(16.0)]).unwrap(),
+        Value::string("OperationError".into())
+    );
+    for promise in &promises[..16] {
+        assert_eq!(vm.promise_state(promise).unwrap(), PromiseState::Pending);
+    }
+
+    drop(completions.borrow_mut().remove(7));
+    vm.run_until_idle().unwrap();
+    assert!(matches!(
+        vm.promise_state(&promises[7]).unwrap(),
+        PromiseState::Rejected(_)
+    ));
+    assert_eq!(
+        vm.start("result", vec![JsValue::number(7.0)]).unwrap(),
+        Value::string("OperationError".into())
+    );
+    for (id, promise) in promises[..16].iter().enumerate() {
+        if id != 7 {
+            assert_eq!(vm.promise_state(promise).unwrap(), PromiseState::Pending);
+        }
+    }
+
+    let replacement = vm.start("digest", vec![JsValue::number(17.0)]).unwrap();
+    assert_eq!(completions.borrow().len(), 16);
+    completions
+        .borrow_mut()
+        .pop()
+        .unwrap()
+        .complete(Ok(vec![0; 32]));
+    vm.run_until_idle().unwrap();
+    assert!(matches!(
+        vm.promise_state(&replacement).unwrap(),
+        PromiseState::Fulfilled(_)
+    ));
+}
+
+#[test]
+fn subtle_pending_completion_blocks_snapshot_even_without_guest_roots() {
     struct NonCloneDiagnostics;
     impl yield_vm::Diagnostics for NonCloneDiagnostics {
         fn report(&self, _: yield_vm::Diagnostic<'_>) {}
     }
 
-    use yield_vm::PlatformServices as _;
     let mut host = TestHost::new();
     let subtle_crypto = host.host().platform().subtle_crypto().cloned().unwrap();
     let platform_host = yield_vm::host! {
@@ -188,8 +330,8 @@ export function run() {
     )
     .unwrap();
     let promise = vm.start("run", vec![]).unwrap();
-    // Completion is applied only when the VM drains the worker result, so the snapshot
-    // check does not race the worker even if the digest has already been computed.
+    // A completed digest remains pending until the VM delivers it, so this
+    // snapshot check does not race the host calculation.
     assert_eq!(vm.promise_state(&promise).unwrap(), PromiseState::Pending);
     assert!(matches!(
         vm.snapshot(&[]),

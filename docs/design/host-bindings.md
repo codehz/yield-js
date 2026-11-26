@@ -75,7 +75,7 @@ impl Demo {
 
 - 编译器用 `Compiler::from_dts` 从 `.d.ts` 取得 `module -> export names` 清单，用于校验 `import` 并在 `Build.imports` 中记录；它不需要知道类的槽布局或 codec。`host!` 在展开时把同一份清单与同一模块类型的 `HostModule::NAME` 与 `ModuleExports::EXPORT_NAMES` 逐名比较，缺少声明的值即编译错误；只比较名字，不比较签名、种类或 arity，实现可以额外注册未声明的名字（它们不进入命名空间导出）。
 - VM 在创建时校验：Build 引用的每个模块和导出都已注册；导出种类匹配（函数必须是函数，常量必须是常量）。
-- 每个 VM 独立接管不可克隆的 `Host`，静态绑定表是内部实现；实例、原型和模块状态每 VM 一份。服务注册表不要求 `Send + Sync`；需要在工作线程执行的服务由其 trait（例如 `FetchService`、`SubtleCryptoService`）自行规定。
+- 每个 VM 独立接管不可克隆的 `Host`，静态绑定表是内部实现；实例、原型和模块状态每 VM 一份。服务注册表不要求 `Send + Sync`；各服务的线程约束由其 trait 单独规定。
 
 ### 4.2 类、槽与成员
 
@@ -240,7 +240,9 @@ let console_host = host! { services: { console: console_sink } }?;
 
 输出适配器注册为 `console`（`ConsoleSink`）。`ConsoleSink::write(&ConsoleEvent)` 不得重入 VM；事件不含 JS 句柄，宿主可复制或自行渲染。服务不登记 operation；恢复到有或无 sink 的宿主都不会重放历史输出。未安装 sink 时，仅实际调用 Printer 才会抛出脚本 `NotSupportedError`。
 
-`subtle_crypto`（`SubtleCryptoService`） 独立于同步熵服务。`execute(SubtleCryptoRequest) -> Result<Vec<u8>, HostFault>` 在 VM 外的工作线程执行（启动时克隆一次绑定值），只收发拥有所有权的字节和参数，不得保存 VM 引用或重入 VM。PBKDF2 输出长度和 GCM 标签长度以位为单位；GCM 密文的末尾包含认证标签，认证失败返回 `HostFault`，不得返回明文。VM 在 `run_until_idle` 的微任务检查点之后非阻塞地交付结果；宿主可用 `Vm::has_pending_subtle_operations` 判断是否需要继续驱动。待交付的原语操作使快照捕获失败；服务对象和 worker 不进入快照。服务失败以脚本 `OperationError` 拒绝，不暴露宿主诊断。
+`subtle_crypto`（`SubtleCryptoService`）独立于同步熵服务。VM 在自己的线程上借用服务调用 `start(SubtleCryptoRequest, SubtleCryptoCompletion) -> Result<(), HostFault>`。提交必须快速返回，不得阻塞或重入 VM；`Ok(())` 只表示接单，`Err` 表示未接单。服务不必可克隆或跨线程共享；宿主可以立即完成，也可以把拥有所有权的请求和一次性完成句柄交给自己的调度设施。完成句柄可跨线程，不含 VM 引用或 JS 值；`complete` 消费句柄并以非阻塞方式提交结果，不直接结算 Promise。PBKDF2 输出长度和 GCM 标签长度以位为单位；GCM 密文的末尾包含认证标签，认证失败返回 `HostFault`，不得返回明文。
+
+VM 在 `run_until_idle` 的微任务检查点之后逐项交付已就绪结果，不要求按提交顺序完成。宿主可用 `Vm::has_pending_subtle_operations` 判断是否仍需驱动 VM。每 VM 最多保留 16 个待交付请求；未接单、超限、服务失败或接单后未完成即丢弃句柄都会以脚本 `OperationError` 拒绝，不暴露宿主诊断。任何待交付请求都会阻止快照捕获；VM 销毁时只丢弃接收端，不等待或取消宿主任务。
 
 ### 5.5 模块状态
 

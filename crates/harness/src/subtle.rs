@@ -3,63 +3,75 @@
 
 use sha2::{Digest, Sha256};
 use yield_vm::binding::HostFault;
-use yield_vm::host::{SubtleCryptoRequest, SubtleCryptoService};
+use yield_vm::host::{SubtleCryptoCompletion, SubtleCryptoRequest, SubtleCryptoService};
 
 #[derive(Clone)]
 pub struct TestSubtleCrypto;
 
 impl SubtleCryptoService for TestSubtleCrypto {
-    fn execute(&self, request: SubtleCryptoRequest) -> Result<Vec<u8>, HostFault> {
-        use SubtleCryptoRequest::*;
-        match request {
-            DigestSha256 { data } => Ok(Sha256::digest(data).to_vec()),
-            HmacSha256 { key, data } => Ok(Hmac::new(&key).digest(&data, &[]).to_vec()),
-            Pbkdf2Sha256 {
-                password,
-                salt,
-                iterations,
-                length,
-            } => pbkdf2(&password, &salt, iterations, length),
-            AesGcmEncrypt {
-                key,
-                iv,
-                additional_data,
-                tag_length,
-                data,
-            } => {
-                let gcm = Gcm::new(&key, &iv, tag_length)?;
-                let mut data = data;
-                gcm.apply_ctr(&mut data)?;
-                let tag = gcm.tag(&additional_data, &data)?;
-                data.extend_from_slice(&tag[..gcm.tag_bytes]);
-                Ok(data)
+    fn start(
+        &self,
+        request: SubtleCryptoRequest,
+        completion: SubtleCryptoCompletion,
+    ) -> Result<(), HostFault> {
+        // Test-only policy: run each accepted request on a detached thread.
+        std::thread::Builder::new()
+            .spawn(move || completion.complete(execute(request)))
+            .map_err(|error| HostFault::new(error.to_string()))?;
+        Ok(())
+    }
+}
+
+fn execute(request: SubtleCryptoRequest) -> Result<Vec<u8>, HostFault> {
+    use SubtleCryptoRequest::*;
+    match request {
+        DigestSha256 { data } => Ok(Sha256::digest(data).to_vec()),
+        HmacSha256 { key, data } => Ok(Hmac::new(&key).digest(&data, &[]).to_vec()),
+        Pbkdf2Sha256 {
+            password,
+            salt,
+            iterations,
+            length,
+        } => pbkdf2(&password, &salt, iterations, length),
+        AesGcmEncrypt {
+            key,
+            iv,
+            additional_data,
+            tag_length,
+            data,
+        } => {
+            let gcm = Gcm::new(&key, &iv, tag_length)?;
+            let mut data = data;
+            gcm.apply_ctr(&mut data)?;
+            let tag = gcm.tag(&additional_data, &data)?;
+            data.extend_from_slice(&tag[..gcm.tag_bytes]);
+            Ok(data)
+        }
+        AesGcmDecrypt {
+            key,
+            iv,
+            additional_data,
+            tag_length,
+            data,
+        } => {
+            let gcm = Gcm::new(&key, &iv, tag_length)?;
+            let mut data = data;
+            let ciphertext_len = data
+                .len()
+                .checked_sub(gcm.tag_bytes)
+                .ok_or_else(auth_error)?;
+            let (ciphertext, supplied_tag) = data.split_at(ciphertext_len);
+            let expected_tag = gcm.tag(&additional_data, ciphertext)?;
+            let difference = supplied_tag
+                .iter()
+                .zip(expected_tag)
+                .fold(0, |acc, (&a, b)| acc | (a ^ b));
+            if difference != 0 {
+                return Err(auth_error());
             }
-            AesGcmDecrypt {
-                key,
-                iv,
-                additional_data,
-                tag_length,
-                data,
-            } => {
-                let gcm = Gcm::new(&key, &iv, tag_length)?;
-                let mut data = data;
-                let ciphertext_len = data
-                    .len()
-                    .checked_sub(gcm.tag_bytes)
-                    .ok_or_else(auth_error)?;
-                let (ciphertext, supplied_tag) = data.split_at(ciphertext_len);
-                let expected_tag = gcm.tag(&additional_data, ciphertext)?;
-                let difference = supplied_tag
-                    .iter()
-                    .zip(expected_tag)
-                    .fold(0, |acc, (&a, b)| acc | (a ^ b));
-                if difference != 0 {
-                    return Err(auth_error());
-                }
-                data.truncate(ciphertext_len);
-                gcm.apply_ctr(&mut data)?;
-                Ok(data)
-            }
+            data.truncate(ciphertext_len);
+            gcm.apply_ctr(&mut data)?;
+            Ok(data)
         }
     }
 }

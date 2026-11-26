@@ -102,8 +102,8 @@ pub use fetch::{
 pub use heap::{Object, PromiseState};
 pub use host::{
     Absent, Completion, ConsoleSink, CryptoService, Diagnostic, Diagnostics, DummyTimeService,
-    GcRoots, Host, Platform, PlatformServices, SubtleCryptoRequest, SubtleCryptoService,
-    SystemTimeService, TimeService, TimerService, UserAgent,
+    GcRoots, Host, Platform, PlatformServices, SubtleCryptoCompletion, SubtleCryptoRequest,
+    SubtleCryptoService, SystemTimeService, TimeService, TimerService, UserAgent,
 };
 pub use init::{RestoreOptions, SnapshotValidation, VmOptions};
 pub use regexp::{RegExpFlags, validate_regexp};

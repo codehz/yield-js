@@ -13,7 +13,7 @@ mod time;
 mod timer;
 
 pub use console::{ConsoleEvent, ConsoleSink};
-pub use crypto::{CryptoService, SubtleCryptoRequest, SubtleCryptoService};
+pub use crypto::{CryptoService, SubtleCryptoCompletion, SubtleCryptoRequest, SubtleCryptoService};
 pub use platform::{Absent, Platform};
 pub use time::{DummyTimeService, SystemTimeService, TimeService};
 pub use timer::TimerService;
@@ -34,7 +34,7 @@ pub trait PlatformServices: 'static {
     type Diagnostics: Diagnostics;
     type Fetch: FetchService;
     type GcRoots: GcRoots;
-    type SubtleCrypto: SubtleCryptoService + Clone;
+    type SubtleCrypto: SubtleCryptoService;
     type Time: TimeService;
     type Timer: TimerService;
 

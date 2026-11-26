@@ -1,5 +1,7 @@
-//! Optional Web Crypto services: synchronous entropy and worker-side subtle
+//! Optional Web Crypto services: synchronous entropy and submitted subtle
 //! primitives. Neither may carry guest values across the boundary.
+
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
 use crate::binding::HostFault;
 
@@ -41,7 +43,32 @@ pub enum SubtleCryptoRequest {
     },
 }
 
-/// Called off the VM thread. Implementations cannot access or reenter the VM.
-pub trait SubtleCryptoService: Send + Sync {
-    fn execute(&self, request: SubtleCryptoRequest) -> Result<Vec<u8>, HostFault>;
+/// Submits owned primitive work on the VM thread. Implementations must return
+/// promptly without blocking or reentering the VM. `Ok(())` accepts the request;
+/// `Err` means it was not accepted, even if the handle was already completed.
+/// The host may complete immediately or schedule the work itself.
+pub trait SubtleCryptoService {
+    fn start(
+        &self,
+        request: SubtleCryptoRequest,
+        completion: SubtleCryptoCompletion,
+    ) -> Result<(), HostFault>;
+}
+
+/// A one-shot result handle for a single request, with no VM references or JS values.
+/// It may be sent to another thread. Dropping it without completing an accepted
+/// request causes the VM to reject that request when it next polls.
+pub struct SubtleCryptoCompletion(SyncSender<Result<Vec<u8>, ()>>);
+
+impl SubtleCryptoCompletion {
+    pub(crate) fn channel() -> (Self, Receiver<Result<Vec<u8>, ()>>) {
+        let (sender, receiver) = sync_channel(1);
+        (Self(sender), receiver)
+    }
+
+    /// Submits the result without waiting for VM delivery. Host fault details
+    /// are discarded, as is the result if the VM has dropped its receiver.
+    pub fn complete(self, result: Result<Vec<u8>, HostFault>) {
+        let _ = self.0.try_send(result.map_err(|_| ()));
+    }
 }
