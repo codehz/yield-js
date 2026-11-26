@@ -4,6 +4,7 @@
 //! and JS handle instances.
 
 // Each class owns one or more tags. `from module` names an existing binding.
+// A class can specify a non-default parent with the same syntax as a type bound.
 macro_rules! html_elements {
     ($consumer:ident $($extra:tt)*) => {
         $consumer! {
@@ -23,23 +24,78 @@ macro_rules! html_elements {
                 (["pre"], HTMLPreElement, construct_pre),
                 (["br"], HTMLBRElement, construct_br),
                 (["hr"], HTMLHRElement, construct_hr),
+                (["a"], HTMLAnchorElement, construct_a),
+                (["area"], HTMLAreaElement, construct_area),
+                (["audio"], HTMLAudioElement : HTMLMediaElement, construct_audio),
+                (["base"], HTMLBaseElement, construct_base),
+                (["body"], HTMLBodyElement, construct_body),
+                (["canvas"], HTMLCanvasElement, construct_canvas),
+                (["caption"], HTMLTableCaptionElement, construct_caption),
+                (["col", "colgroup"], HTMLTableColElement, construct_col),
+                (["data"], HTMLDataElement, construct_data),
+                (["datalist"], HTMLDataListElement, construct_datalist),
+                (["del", "ins"], HTMLModElement, construct_del),
+                (["details"], HTMLDetailsElement, construct_details),
+                (["dialog"], HTMLDialogElement, construct_dialog),
+                (["dl"], HTMLDListElement, construct_dl),
+                (["embed"], HTMLEmbedElement, construct_embed),
+                (["fieldset"], HTMLFieldSetElement, construct_fieldset),
+                (["form"], HTMLFormElement, construct_form),
+                (["head"], HTMLHeadElement, construct_head),
+                (["html"], HTMLHtmlElement, construct_html),
+                (["img"], HTMLImageElement, construct_img),
+                (["legend"], HTMLLegendElement, construct_legend),
+                (["link"], HTMLLinkElement, construct_link),
+                (["map"], HTMLMapElement, construct_map),
+                (["menu"], HTMLMenuElement, construct_menu),
+                (["meta"], HTMLMetaElement, construct_meta),
+                (["meter"], HTMLMeterElement, construct_meter),
+                (["object"], HTMLObjectElement, construct_object),
+                (["optgroup"], HTMLOptGroupElement, construct_optgroup),
+                (["option"], HTMLOptionElement, construct_option),
+                (["output"], HTMLOutputElement, construct_output),
+                (["picture"], HTMLPictureElement, construct_picture),
+                (["progress"], HTMLProgressElement, construct_progress),
+                (["script"], HTMLScriptElement, construct_script),
+                (["select"], HTMLSelectElement, construct_select),
+                (["selectedcontent"], HTMLSelectedContentElement, construct_selectedcontent),
+                (["slot"], HTMLSlotElement, construct_slot),
+                (["source"], HTMLSourceElement, construct_source),
+                (["style"], HTMLStyleElement, construct_style),
+                (["table"], HTMLTableElement, construct_table),
+                (["tbody", "tfoot", "thead"], HTMLTableSectionElement, construct_tbody),
+                (["td", "th"], HTMLTableCellElement, construct_td),
+                (["template"], HTMLTemplateElement, construct_template),
+                (["textarea"], HTMLTextAreaElement, construct_textarea),
+                (["time"], HTMLTimeElement, construct_time),
+                (["title"], HTMLTitleElement, construct_title),
+                (["tr"], HTMLTableRowElement, construct_tr),
+                (["track"], HTMLTrackElement, construct_track),
+                (["video"], HTMLVideoElement : HTMLMediaElement, construct_video),
             }
             $($extra)*
         }
     };
 }
 
+#[yield_binding_macros::host_class(tag, parent = element::HTMLElement)]
+struct HTMLMediaElement;
+
 macro_rules! declare_html_element {
     ($class:ident) => {
         #[yield_binding_macros::host_class(tag, parent = element::HTMLElement)]
+        struct $class;
+    };
+    ($class:ident : $parent:ident) => {
+        #[yield_binding_macros::host_class(tag, parent = $parent)]
         struct $class;
     };
     ($class:ident, from $owner:ident) => {};
 }
 
 macro_rules! declare_html_elements {
-    ({ $(($tags:tt, $class:ident, $ctor:ident $(, from $owner:ident)?),)* }) => {
-        $(declare_html_element!($class $(, from $owner)?);)*
+    ({ $(($tags:tt, $class:ident $(: $parent:ident)?, $ctor:ident $(, from $owner:ident)?),)* }) => {
+        $(declare_html_element!($class $(: $parent)? $(, from $owner)?);)*
     };
 }
 

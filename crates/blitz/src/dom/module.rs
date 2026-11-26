@@ -7,6 +7,7 @@ use yield_vm::intrinsics::TypeError;
 use yield_vm::{HostStep, Instance, JsError, JsResult, JsValue, ModuleCx};
 
 use super::Dom;
+use super::HTMLMediaElement;
 use super::document::{Document, DocumentSlots};
 use super::element::{Element, HTMLElement, alloc_element};
 use super::node::Node;
@@ -15,14 +16,14 @@ use crate::snapshot::DomState;
 
 macro_rules! define_dom_module {
     (
-        { $(($tags:tt, $class:ident, $ctor:ident $(, from $owner:ident)?),)* }
+        { $(($tags:tt, $class:ident $(: $parent:ident)?, $ctor:ident $(, from $owner:ident)?),)* }
         $($item:item)*
     ) => {
         use super::{$($($owner ::)? $class),*};
 
         #[host_module(
             name = "yield:dom",
-            classes = [Node, Document, Element, HTMLElement, $($class,)*],
+            classes = [Node, Document, Element, HTMLElement, HTMLMediaElement, $($class,)*],
             services = [dom: Rc<RefCell<Dom>>],
         )]
         #[derive(Default, yield_vm::Encode, yield_vm::Decode)]
@@ -52,6 +53,11 @@ macro_rules! define_dom_module {
             #[constructor(class = HTMLElement)]
             fn construct_html_element(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<HTMLElement>> {
                 alloc_element(cx, HTMLElement)
+            }
+
+            #[constructor(class = HTMLMediaElement)]
+            fn construct_media(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<HTMLMediaElement>> {
+                alloc_element(cx, HTMLMediaElement)
             }
 
             $(

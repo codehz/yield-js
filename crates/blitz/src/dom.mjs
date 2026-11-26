@@ -10,6 +10,23 @@ export {
 export {
   HTMLDivElement, HTMLSpanElement, HTMLHeadingElement, HTMLParagraphElement,
   HTMLOListElement, HTMLQuoteElement, HTMLPreElement, HTMLBRElement, HTMLHRElement,
+  HTMLMediaElement, HTMLAnchorElement, HTMLAreaElement,
+  HTMLAudioElement, HTMLBaseElement, HTMLBodyElement,
+  HTMLCanvasElement, HTMLTableCaptionElement, HTMLTableColElement,
+  HTMLDataElement, HTMLDataListElement, HTMLModElement,
+  HTMLDetailsElement, HTMLDialogElement, HTMLDListElement,
+  HTMLEmbedElement, HTMLFieldSetElement, HTMLFormElement,
+  HTMLHeadElement, HTMLHtmlElement, HTMLImageElement,
+  HTMLLegendElement, HTMLLinkElement, HTMLMapElement,
+  HTMLMenuElement, HTMLMetaElement, HTMLMeterElement,
+  HTMLObjectElement, HTMLOptGroupElement, HTMLOptionElement,
+  HTMLOutputElement, HTMLPictureElement, HTMLProgressElement,
+  HTMLScriptElement, HTMLSelectElement, HTMLSelectedContentElement,
+  HTMLSlotElement, HTMLSourceElement, HTMLStyleElement,
+  HTMLTableElement, HTMLTableSectionElement, HTMLTableCellElement,
+  HTMLTemplateElement, HTMLTextAreaElement, HTMLTimeElement,
+  HTMLTitleElement, HTMLTableRowElement, HTMLTrackElement,
+  HTMLVideoElement,
 } from 'yield:dom';
 export const window = globalThis;
 export const document = openDocument(window);

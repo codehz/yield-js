@@ -49,7 +49,7 @@
 - Blitz 为显式 `.css` 导入注册文本加载器：普通样式表保留原始字节，无脚本导出；`.module.css` 以规范化逻辑 ID 改写局部类名，默认导出无原型映射，支持同文件和全局 `composes`。两者均由 ESM 调用 `yield:dom.insertCss`；宿主按精确 URI 读取构建字节，将 UTF-8 文本作为 `head` 末尾的作者样式节点插入。恢复重建已保存的样式节点，不重新执行导入。
 - `BlitzSession::click` 和原生窗口的主键点击共用 VM 的 `EventTarget` 派发：向当前文档的元素发送可信、可冒泡、可取消的 `click`；取消会阻止 Blitz 默认动作。节点的事件父级用 VM 托管槽保存，随 `appendChild`、`insertBefore` 和 `removeChild` 移动或脱离更新。快照不重放原生输入；恢复后应从新文档取得目标，再投递下一次点击。
 - 原生单行文本编辑完成后，Blitz 向 `HTMLInputElement` 派发可信、可冒泡、不可取消的 `input`。`value` 读写当前编辑值，`defaultValue` 反映默认值属性；React 用原型访问器跟踪当前值，通过 `onChange` 更新状态，并能反向写入原生编辑器。快照恢复已提交文本与 React 状态，重新聚焦后可继续输入。
-- HTML 元素使用 `HTMLElement` 或专用原型：input、iframe、button、label、ul、li、div、span、p、ol、pre、br、hr；`h1`–`h6` 共用 `HTMLHeadingElement`，`blockquote` 与 `q` 共用 `HTMLQuoteElement`，各节点保留自己的标签名。已绑定的原型属性反射到原生 DOM 属性。复选框的 `checked` 与绘制共用当前值，`defaultChecked` 反映 checked 属性；用户点击在监听器执行前切换当前值，取消则还原。快照保留复选框与默认值独立的当前值和 dirty 状态，包括脱离文档的节点。
+- HTML 命名空间内，现行 HTML 标准中有专用 DOM 接口的元素使用其对应原型；同接口的标签（如 `h1`–`h6`、`td` 与 `th`）共用原型但保留各自的标签名。`HTMLAudioElement` 和 `HTMLVideoElement` 继承 `HTMLMediaElement`。已绑定的原型属性反射到原生 DOM 属性。复选框的 `checked` 与绘制共用当前值，`defaultChecked` 反映 checked 属性；用户点击在监听器执行前切换当前值，取消则还原。快照保留复选框与默认值独立的当前值和 dirty 状态，包括脱离文档的节点。
 - Blitz 接入 VM 的可取消定时器唤醒，让 React scheduler 的 `setTimeout` 回退在事件轮次后继续执行；窗口通过文档轮询接收延迟唤醒，快照恢复后重新登记未完成的定时器。
 - 编译期 CFG 活性分析：每个恢复入口先扣除该入口的结果槽，再取并集作为 `saved_slots`；异常边参与活性。
 - 不跨挂起点的值分配到瞬时槽，活性区间不相交的值可复用同一个瞬时槽；持久槽不复用。挂起时丢弃瞬时槽，恢复时只重建指定持久槽。

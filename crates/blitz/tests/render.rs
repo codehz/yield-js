@@ -475,11 +475,68 @@ fn restores_html_wrappers_and_reflected_attributes() -> Result<(), String> {
                 ['ol', HTMLOListElement], ['blockquote', HTMLQuoteElement], ['q', HTMLQuoteElement],
                 ['pre', HTMLPreElement], ['br', HTMLBRElement], ['hr', HTMLHRElement],
                 ['h1', HTMLHeadingElement], ['h2', HTMLHeadingElement], ['h3', HTMLHeadingElement],
-                ['h4', HTMLHeadingElement], ['h5', HTMLHeadingElement], ['h6', HTMLHeadingElement]]) {
+                ['h4', HTMLHeadingElement], ['h5', HTMLHeadingElement], ['h6', HTMLHeadingElement],
+                ['a', HTMLAnchorElement],
+                ['area', HTMLAreaElement],
+                ['audio', HTMLAudioElement],
+                ['base', HTMLBaseElement],
+                ['body', HTMLBodyElement],
+                ['canvas', HTMLCanvasElement],
+                ['caption', HTMLTableCaptionElement],
+                ['col', HTMLTableColElement], ['colgroup', HTMLTableColElement],
+                ['data', HTMLDataElement],
+                ['datalist', HTMLDataListElement],
+                ['del', HTMLModElement], ['ins', HTMLModElement],
+                ['details', HTMLDetailsElement],
+                ['dialog', HTMLDialogElement],
+                ['dl', HTMLDListElement],
+                ['embed', HTMLEmbedElement],
+                ['fieldset', HTMLFieldSetElement],
+                ['form', HTMLFormElement],
+                ['head', HTMLHeadElement],
+                ['html', HTMLHtmlElement],
+                ['img', HTMLImageElement],
+                ['legend', HTMLLegendElement],
+                ['link', HTMLLinkElement],
+                ['map', HTMLMapElement],
+                ['menu', HTMLMenuElement],
+                ['meta', HTMLMetaElement],
+                ['meter', HTMLMeterElement],
+                ['object', HTMLObjectElement],
+                ['optgroup', HTMLOptGroupElement],
+                ['option', HTMLOptionElement],
+                ['output', HTMLOutputElement],
+                ['picture', HTMLPictureElement],
+                ['progress', HTMLProgressElement],
+                ['script', HTMLScriptElement],
+                ['select', HTMLSelectElement],
+                ['selectedcontent', HTMLSelectedContentElement],
+                ['slot', HTMLSlotElement],
+                ['source', HTMLSourceElement],
+                ['style', HTMLStyleElement],
+                ['table', HTMLTableElement],
+                ['tbody', HTMLTableSectionElement], ['tfoot', HTMLTableSectionElement], ['thead', HTMLTableSectionElement],
+                ['td', HTMLTableCellElement], ['th', HTMLTableCellElement],
+                ['template', HTMLTemplateElement],
+                ['textarea', HTMLTextAreaElement],
+                ['time', HTMLTimeElement],
+                ['title', HTMLTitleElement],
+                ['tr', HTMLTableRowElement],
+                ['track', HTMLTrackElement],
+                ['video', HTMLVideoElement]]) {
                 const node = document.createElement(tag);
                 if (Object.getPrototypeOf(node) !== type.prototype || node.tagName !== tag.toUpperCase()) {
                     throw new Error('wrong prototype or tag name for createElement: ' + tag);
                 }
+            }
+            for (const type of [HTMLAudioElement, HTMLVideoElement]) {
+                if (Object.getPrototypeOf(type.prototype) !== HTMLMediaElement.prototype) {
+                    throw new Error('wrong media prototype chain');
+                }
+            }
+            if (!(document.documentElement instanceof HTMLHtmlElement) ||
+                !(document.body instanceof HTMLBodyElement)) {
+                throw new Error('wrong prototype for parsed document elements');
             }
             const section = document.createElement('section');
             section.setAttribute('outer', {
