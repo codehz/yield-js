@@ -242,22 +242,20 @@ impl FixtureResolver<'_> {
         if id.ends_with(".module.css") {
             return Err(format!("unsupported syntax: CSS Modules ({id})"));
         }
-        let source = self.0.load(id)?;
         let uri = format!("asset:{id}");
-        let literal = serde_json::to_string(&uri).expect("encode CSS URI as a string literal");
-        match self.1.borrow_mut().entry(id.clone()) {
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(BuildResource {
-                    uri,
-                    bytes: source.as_bytes().into(),
-                });
-            }
-            std::collections::btree_map::Entry::Occupied(entry) => {
-                if &*entry.get().bytes != source.as_bytes() {
-                    return Err(format!("conflicting CSS resource: {uri}"));
-                }
-            }
+        if !self.1.borrow().contains_key(id) {
+            // A canonical ID is defined once: later imports reuse the first
+            // resource and never reread the file.
+            let bytes = self.0.load(id)?.as_bytes().into();
+            self.1.borrow_mut().insert(
+                id.clone(),
+                BuildResource {
+                    uri: uri.clone(),
+                    bytes,
+                },
+            );
         }
+        let literal = serde_json::to_string(&uri).expect("encode CSS URI as a string literal");
         Ok(Cow::Owned(format!(
             "import {{ insertCss }} from 'yield:dom'; insertCss({literal});"
         )))
