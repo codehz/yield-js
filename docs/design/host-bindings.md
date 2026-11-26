@@ -208,9 +208,9 @@ pub trait Decode<Owner = ()>: Sized {
 
 `host!` 的 `services:` 段区分内建 `name: value` 和自定义 `Type => value`。内建值按值进入 `Platform` 的可选字段，通过 `host.platform()` 的访问器借用；未指定的字段返回 `None`。宏不为内建值装箱、包装共享指针或按类型查询。自定义布局仍整体擦除；同一宿主的确切自定义类型（含别名）只可注册一次。`host.bind_service::<T>()` 或 `vm.bind_service::<T>()` 只查找自定义项；同一具体类型可同时用于两个通道。
 
-模块、类和 operation 在各自的属性宏里用 `services = [name: Type, …]` 声明依赖，生成 `Owner::name(services)` 访问器。所有依赖都必需；链接按确切类型解析到该宿主布局的字段偏移，缺失时报消费者名和服务类型。模块导出从 `ModuleCx::services()` 读取，类方法和访问器从 `ClassCx::services()` 读取声明类的服务（包括继承调用）。初始化、codec、operation 驱动则直接收到所属类型的服务视图。VM 内建独立解析自身可能缺席的宿主能力，不使用这套依赖声明。
+模块、类和 operation 在各自的属性宏里用 `services = [name: Type, …]` 声明依赖，生成 `Owner::name(services)` 访问器。Rust 编译器按确切类型为选中模块及其声明的类和 operation 推断唯一的自定义字段；缺少依赖或以别名重复注册均无法编译。宿主构造时为每个消费者绑定具名字段视图。模块导出从 `ModuleCx::services()` 读取，类方法和访问器从 `ClassCx::services()` 读取声明类的服务（包括继承调用）。初始化、codec、operation 驱动则直接收到所属类型的服务视图。VM 内建独立解析自身可能缺席的宿主能力，不使用这套依赖声明。
 
-例如 `Self::counters(cx.services())` 直接读取链接期解析的字段，不查类型表、不做 `Any` downcast。服务借用不占用对上下文的借用；可以持有它并用 `&mut CallCx` 分配对象或写槽。返回 `HostStep::Suspend` 后，不能保存本次调用的借用；续体从新的上下文取得服务。
+例如 `Self::counters(cx.services())` 只通过视图中的具名字段借用服务，不查类型表、偏移表，也不做 `Any` downcast。服务借用不占用对上下文的借用；可以持有它并用 `&mut CallCx` 分配对象或写槽。返回 `HostStep::Suspend` 后，不能保存本次调用的借用；续体从新的上下文取得服务。
 
 ```rust
 #[host_module(name = "test", services = [counters: Rc<Counters>, labels: Rc<LabelService>])]
@@ -466,7 +466,7 @@ flowchart TB
 1. **跨进程式恢复。** 保存 `m = expect(obj)`、`obj.matcher = m`、`f = m.toEqual.bind(m)` 和环；销毁 VM 与宿主，只用快照、Build、声明恢复；通过别名修改 `obj` 后调用 `f`，断言看到修改，且实例身份、原型和别名延续。
 2. **方法共享与接收者校验。** `a.toEqual === b.toEqual`；裸调抛 `TypeError`；`Object.create(Matcher.prototype)` 对象不能冒充实例；脚本改写原型方法后快照保留修改。
 3. **值域。** 函数、符号、环、同一对象的多个槽、`undefined` 与「未初始化」区分正确；跨调用保存的旧句柄被拒绝。
-4. **payload 与服务。** 带 payload 的节点从平台工厂重建，不依赖旧节点表；缺少服务或 payload 截断均整体拒绝恢复且无资源泄漏。
+4. **payload 与服务。** 带 payload 的节点从平台工厂重建，不依赖旧节点表；缺少声明的服务无法构造宿主，payload 截断则整体拒绝恢复且无资源泄漏。
 5. **operation 策略。** `Pause` 以 `undefined` 兑现且只兑现一次；`Resume` 重新登记后交付一次；`Reissue` 不重跑发起函数；`Reject` 经原 `catch` 路径；旧代际交付被拒绝。
 6. **策略性拒绝 vs 恢复失败。** 前者脚本可观察、其他续体继续；后者 VM 不创建。
 7. **不可达实例。** 不在快照中的实例不要求解码，快照也不包含其 payload。

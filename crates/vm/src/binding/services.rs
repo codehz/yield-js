@@ -1,39 +1,41 @@
-//! Link-time service resolution for erased, host-owned field layouts.
+//! Statically built service views and the host-only type lookup table.
 
-use std::any::{Any, TypeId, type_name};
+use std::any::{Any, TypeId};
 use std::marker::PhantomData;
 
-/// The single ordered dependency declaration for a host binding type.
+#[doc(hidden)]
+pub trait Provide<T, I> {
+    fn provide(&self) -> &T;
+}
+
+#[doc(hidden)]
+pub struct Slot<const N: usize>;
+
+#[doc(hidden)]
+pub fn assert_unique<T, L: Provide<T, I>, I>(_: &L) {}
+
+/// The generated field view for a host binding type.
 ///
 /// # Safety
-/// Each generated accessor must use the slot matching its exact return type.
+/// Accessors must read only this owner's view and treat its projections as shared.
 #[doc(hidden)]
 pub unsafe trait ServiceOwner: 'static {
-    const SERVICE_DEPENDENCIES: &'static [ServiceDependency];
+    type View: 'static;
 }
 
+/// Build the owner's projections from the provided layout.
+///
+/// # Safety
+/// The view must be valid for shared access as long as the layout stays live at
+/// the same address. Dropping it must not access the layout.
 #[doc(hidden)]
-pub struct ServiceDependency {
-    type_id: TypeId,
-    type_name: fn() -> &'static str,
-}
-
-impl ServiceDependency {
-    // Infer the type from the accessor instead of expanding its type twice.
-    pub const fn of_accessor<Owner, T: Any>(
-        _: fn(&Services<'static, Owner>) -> &'static T,
-    ) -> Self {
-        Self {
-            type_id: TypeId::of::<T>(),
-            type_name: type_name::<T>,
-        }
-    }
+pub unsafe trait BuildView<L, I>: ServiceOwner {
+    fn build_view(layout: &L) -> Self::View;
 }
 
 #[doc(hidden)]
 pub struct ServiceField {
     type_id: TypeId,
-    type_name: fn() -> &'static str,
     offset: usize,
 }
 
@@ -41,52 +43,53 @@ impl ServiceField {
     pub const fn of<T: Any>(offset: usize) -> Self {
         Self {
             type_id: TypeId::of::<T>(),
-            type_name: type_name::<T>,
             offset,
         }
     }
 }
 
-/// Owns the entire generated Rust struct. `Any` owns/drops it, but is never
-/// used to inspect its dynamic type.
+/// Owns the layout without moving it after views have been constructed.
 #[doc(hidden)]
 pub struct ServiceStorage {
-    layout: Box<dyn Any>,
+    layout: *mut dyn Any,
     fields: Box<[ServiceField]>,
 }
 
 impl Default for ServiceStorage {
     fn default() -> Self {
         Self {
-            layout: Box::new(()),
+            layout: Box::into_raw(Box::new(())),
             fields: Box::default(),
         }
     }
 }
 
+impl Drop for ServiceStorage {
+    fn drop(&mut self) {
+        // SAFETY: storage exclusively owns this original Box allocation.
+        drop(unsafe { Box::from_raw(self.layout) });
+    }
+}
+
 impl ServiceStorage {
+    /// Build all views from the final boxed layout before handing either one to
+    /// the declaration assembler.
+    ///
     /// # Safety
-    /// Every descriptor must identify a real, aligned field of precisely its
-    /// declared type in `layout`. The field must remain valid for shared
-    /// access through the boxed layout (in particular, no packed fields).
-    pub unsafe fn from_layout(
-        layout: impl Any,
+    /// Each descriptor must identify a real, aligned field of its exact type.
+    /// The layout must not be packed and remains shared through all views.
+    pub unsafe fn with_layout<L: Any, R>(
+        layout: Box<L>,
         fields: impl Into<Box<[ServiceField]>>,
-    ) -> Result<Self, String> {
+        build: impl FnOnce(&L) -> R,
+    ) -> (Self, R) {
         let mut fields = fields.into();
         fields.sort_unstable_by_key(|field| field.type_id);
-        for pair in fields.windows(2) {
-            if pair[0].type_id == pair[1].type_id {
-                return Err(format!(
-                    "duplicate host service {:?}",
-                    (pair[0].type_name)()
-                ));
-            }
-        }
-        Ok(Self {
-            layout: Box::new(layout),
-            fields,
-        })
+        let layout = Box::into_raw(layout);
+        let storage = Self { layout, fields };
+        // SAFETY: storage owns the stable allocation, including during unwind.
+        let views = build(unsafe { &*layout });
+        (storage, views)
     }
 
     fn offset(&self, type_id: TypeId) -> Option<usize> {
@@ -99,51 +102,18 @@ impl ServiceStorage {
 
     pub(crate) fn bind<T: Any>(&self) -> Option<&T> {
         let offset = self.offset(TypeId::of::<T>())?;
-        // SAFETY: the descriptor was selected by its exact type and belongs
-        // to this boxed layout.
-        Some(unsafe { project(base(self.layout.as_ref()), offset) })
-    }
-
-    pub(crate) fn resolve(
-        &self,
-        dependencies: &[ServiceDependency],
-    ) -> Result<ResolvedServices, &'static str> {
-        let mut offsets = Vec::with_capacity(dependencies.len());
-        for dependency in dependencies {
-            offsets.push(
-                self.offset(dependency.type_id)
-                    .ok_or_else(dependency.type_name)?,
-            );
-        }
-        Ok(ResolvedServices(offsets))
-    }
-
-    /// # Safety
-    /// `resolved` must have been resolved against this storage (or be empty).
-    pub(crate) unsafe fn view<'a>(&'a self, resolved: &'a ResolvedServices) -> Services<'a> {
-        Services {
-            layout: self.layout.as_ref(),
-            offsets: &resolved.0,
-            owner: PhantomData,
-        }
+        // SAFETY: descriptor was selected by exact type and belongs to this layout.
+        Some(unsafe { project(self.layout.cast::<u8>(), offset) })
     }
 }
 
-pub(crate) struct ResolvedServices(Vec<usize>);
-
-impl ResolvedServices {
-    pub(crate) const EMPTY: Self = Self(Vec::new());
-}
-
-/// The linked services for `Owner`. Accessors are generated next to its declaration.
+/// Borrowed declaration-specific service view.
 pub struct Services<'a, Owner = ()> {
-    layout: &'a dyn Any,
-    offsets: &'a [usize],
+    view: &'a dyn Any,
     owner: PhantomData<fn(Owner) -> Owner>,
 }
 
 impl<Owner> Copy for Services<'_, Owner> {}
-
 impl<Owner> Clone for Services<'_, Owner> {
     fn clone(&self) -> Self {
         *self
@@ -153,8 +123,7 @@ impl<Owner> Clone for Services<'_, Owner> {
 impl Default for Services<'_> {
     fn default() -> Self {
         Self {
-            layout: &(),
-            offsets: &[],
+            view: &(),
             owner: PhantomData,
         }
     }
@@ -162,11 +131,20 @@ impl Default for Services<'_> {
 
 impl<'a> Services<'a> {
     /// # Safety
-    /// The view must have been linked from `Owner::SERVICE_DEPENDENCIES`.
+    /// The view and its projections remain valid for `'a`; its layout remains
+    /// owned by the same binding table for that whole lifetime.
+    pub(crate) unsafe fn from_view(view: &'a dyn Any) -> Self {
+        Self {
+            view,
+            owner: PhantomData,
+        }
+    }
+
+    /// # Safety
+    /// The view belongs to `Owner`, and its layout stays live for `'a`.
     pub(crate) unsafe fn for_owner<Owner: ServiceOwner>(self) -> Services<'a, Owner> {
         Services {
-            layout: self.layout,
-            offsets: self.offsets,
+            view: self.view,
             owner: PhantomData,
         }
     }
@@ -174,22 +152,17 @@ impl<'a> Services<'a> {
 
 impl<'a, Owner: ServiceOwner> Services<'a, Owner> {
     /// # Safety
-    /// `index` must be the declared slot for `T` in `Owner`.
+    /// The caller pairs this borrow with Owner's view and its stable live layout.
     #[doc(hidden)]
     #[inline]
-    pub unsafe fn __get<T: Any>(&self, index: usize) -> &'a T {
-        // SAFETY: linking populated this required slot for T in this layout.
-        unsafe { project(base(self.layout), *self.offsets.get_unchecked(index)) }
+    pub unsafe fn __view(&self) -> &'a Owner::View {
+        // SAFETY: guaranteed by the caller constructing the erased view borrow.
+        unsafe { &*(self.view as *const dyn Any).cast::<Owner::View>() }
     }
 }
 
-fn base(layout: &dyn Any) -> *const u8 {
-    (layout as *const dyn Any).cast::<u8>()
-}
-
 /// # Safety
-/// The base must have provenance over a live layout with a valid, aligned `T`
-/// at `offset` which can be shared for `'a`.
+/// `base` must point to a live layout with an aligned `T` at `offset`.
 unsafe fn project<'a, T>(base: *const u8, offset: usize) -> &'a T {
     unsafe { &*base.add(offset).cast::<T>() }
 }

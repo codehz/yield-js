@@ -1057,44 +1057,6 @@ export async function run() {
     );
 }
 
-#[test]
-fn linking_node_class_requires_factory_service() {
-    use yield_vm::__macro_support as abi;
-
-    let mut deps = abi::ModuleDependencies::default();
-    deps.class::<yield_harness::Node>();
-    let platform: yield_vm::Platform = Default::default();
-    let error =
-        abi::link([], deps, abi::ServiceStorage::default(), platform).expect_err("missing factory");
-    assert!(
-        error.contains("host class \"Node\": missing host service")
-            && error.contains("NodeFactory"),
-        "{error}"
-    );
-}
-
-#[test]
-fn linking_harness_operations_requires_driver_services() {
-    use yield_vm::__macro_support as abi;
-
-    fn missing_service<O: OperationDriver>(operation: &str, service: &str) {
-        let mut deps = abi::ModuleDependencies::default();
-        deps.operation::<O>();
-        let platform: yield_vm::Platform = Default::default();
-        let error = abi::link([], deps, abi::ServiceStorage::default(), platform)
-            .expect_err("missing driver service");
-        assert!(
-            error.contains(&format!(
-                "host operation {operation:?}: missing host service"
-            )) && error.contains(service),
-            "{error}"
-        );
-    }
-
-    missing_service::<yield_harness::Wait>("wait", "LabelService");
-    missing_service::<yield_harness::Timer>("timer", "FakeClock");
-}
-
 mod inherit_fixture {
     use super::*;
 

@@ -85,13 +85,7 @@ pub fn make_host() -> Result<Host, String> {{
 
     fn check(&self) -> (bool, String) {
         let output = Command::new(env!("CARGO"))
-            .args([
-                "check",
-                "--offline",
-                "--message-format",
-                "short",
-                "--manifest-path",
-            ])
+            .args(["check", "--offline", "--manifest-path"])
             .arg(self.dir.join("Cargo.toml"))
             .env(
                 "CARGO_TARGET_DIR",
@@ -290,5 +284,82 @@ pub fn move_services() {
     assert!(
         !ok && output.contains("src/lib.rs:6:") && output.contains("E0277"),
         "{output}"
+    );
+}
+
+#[test]
+fn selected_consumers_require_static_service_providers() {
+    let fixture = Fixture::new("static-services");
+    fixture.write("src/host.d.ts", "declare module 'test' {}");
+    let source = r#"
+use yield_vm::{Host, host};
+
+mod bindings {
+    use yield_vm::{Decode, Encode, HostFault, OperationDriver, OperationToken, Registration,
+        Services, host_class, host_module, module_exports, operation};
+
+    #[host_class(tag = "NeedsClass", services = [value: u32])]
+    struct Class;
+
+    #[operation(name = "needs-op", recovery = pause, services = [value: u64])]
+    #[derive(Encode, Decode)]
+    struct Op;
+
+    impl Registration<Op> for () {}
+
+    impl OperationDriver for Op {
+        type Live = ();
+        fn start(&self, _: OperationToken, _: &Services<'_, Self>) -> Result<(), HostFault> {
+            Ok(())
+        }
+    }
+
+    #[host_module(name = "test", classes = [Class], operations = [Op], services = [value: u16])]
+    pub struct Module;
+
+    #[module_exports]
+    impl Module {}
+}
+
+pub fn make_host() -> Result<Host, String> {
+    host! {
+        dts: "host.d.ts",
+        modules: [bindings::Module],
+        services: { u16 => 1, u32 => 2, u64 => 3, },
+    }
+}
+
+pub fn no_consumers() -> Result<Host, String> {
+    type Alias = u8;
+    host! { services: { Alias => 4, } }
+}
+"#;
+    fixture.write("src/lib.rs", source);
+    let (ok, output) = fixture.check();
+    assert!(ok, "baseline service registrations must compile:\n{output}");
+
+    for (entry, ty) in [
+        ("u16 => 1,", "u16"),
+        ("u32 => 2,", "u32"),
+        ("u64 => 3,", "u64"),
+    ] {
+        fixture.write("src/lib.rs", &source.replace(entry, ""));
+        let (ok, output) = fixture.check();
+        assert!(
+            !ok && output.contains("Provide") && output.contains(ty),
+            "missing {ty}:\n{output}"
+        );
+    }
+
+    fixture.write(
+        "src/lib.rs",
+        &source.replace("Alias => 4,", "Alias => 4, u8 => 5,"),
+    );
+    let (ok, output) = fixture.check();
+    assert!(
+        !ok && output.contains("E0283")
+            && output.contains("Provide")
+            && output.contains("assert_unique"),
+        "duplicate types must be ambiguous even without consumers:\n{output}"
     );
 }

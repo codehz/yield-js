@@ -13,7 +13,7 @@
 
 `Vm::new(build, host, options)` 与 `Vm::restore(snapshot, build, host, options)` 消费具体的、不可克隆的 `Host`；`Vm<P>` 按值持有 `Host<P>`，`P` 是内建平台配置。不同配置类型之间可恢复，只要绑定指纹与镜像所需能力匹配。执行和投递始终使用该 VM 的宿主，调用方不再传入或替换宿主。宿主及其服务实例不随快照保存；分叉恢复时为每个 VM 构造宿主，可显式共享允许共享的服务句柄。
 
-`host!` 既可用 `dts`、`modules`、`services` 注册宿主绑定，也可单独使用 `services`；没有绑定或服务时使用 `Host::default()`。服务按确切的存储类型注册，嵌入方用 `vm.bind_service::<T>()` 解析并只读借用，回调通过消费者宏生成的访问器读取链接期预解析的必需服务。外部工作可在后台执行，再由嵌入方回到 VM 线程投递代际令牌和结果；回调不得重入 VM。
+`host!` 既可用 `dts`、`modules`、`services` 注册宿主绑定，也可单独使用 `services`；没有绑定或服务时使用 `Host::default()`。服务按确切的存储类型注册，嵌入方用 `Host::bind_service::<T>()` 或 `Vm::bind_service::<T>()` 查询并只读借用，回调则通过消费者宏生成的访问器直接借用编译期确定、在宿主构造时绑定的字段。外部工作可在后台执行，再由嵌入方回到 VM 线程投递代际令牌和结果；回调不得重入 VM。
 
 可选服务 `diagnostics`（`Diagnostics`） 通过 `report(&self, event: Diagnostic<'_>)` 接收 `Uncaught`（异常值与诊断文本）、`UnhandledRejection`（Promise 与理由）和 `StartupException`（诊断文本）。全局异常和未处理拒绝先派发可取消的脚本事件；仅未取消的报告进入服务，错误报告期间再次抛出的异常直接报告，不递归派发。模块初始化异常在返回原错误前报告，不派发脚本事件。未安装服务时没有宿主报告，脚本通知与错误返回不变。诊断携带的临时值不能脱离调用保存。`UserAgent(String)` 仅在新建时用于初始化 `navigator.userAgent`；恢复用快照中的属性。
 

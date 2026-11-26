@@ -136,14 +136,15 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
     let module = required(module, span, "name")?;
     let classes = classes.unwrap_or_default();
     let operations = operations.unwrap_or_default();
-    let dependencies = (!classes.is_empty() || !operations.is_empty()).then(|| {
-        quote! {
-            fn register_dependencies(deps: &mut ::yield_vm::__macro_support::ModuleDependencies) {
-                #(deps.class::<#classes>();)*
-                #(deps.operation::<#operations>();)*
-            }
-        }
-    });
+    let abi = quote!(::yield_vm::__macro_support);
+    let layout = Ident::new("__YieldLayout", MacroSpan::mixed_site());
+    let indices = |prefix: &str, len| -> Vec<_> {
+        (0..len)
+            .map(|i| Ident::new(&format!("{prefix}{i}"), MacroSpan::mixed_site()))
+            .collect()
+    };
+    let ic = indices("__YieldClassIndex", classes.len());
+    let io = indices("__YieldOperationIndex", operations.len());
     let slots = extract_slots(&mut item)?;
     let empty = match &item.fields {
         syn::Fields::Unit => Some(quote!(Self)),
@@ -154,6 +155,19 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
     let decls = slot_decls(&slots);
     let ty = &item.ident;
     let services = service_owner(ty, &item.vis, services.unwrap_or_default());
+    let registration = quote! {
+        // SAFETY: every dependency view is built from the supplied layout.
+        unsafe impl<#layout #(, #ic)* #(, #io)*> #abi::RegisterConsumers<#layout, ((#(#ic,)*), (#(#io,)*))> for #ty
+        where
+            #(#classes: #abi::BuildView<#layout, #ic>,)*
+            #(#operations: #abi::BuildView<#layout, #io>,)*
+        {
+            fn register_consumers(layout: &#layout, deps: &mut #abi::ModuleDependencies) {
+                #(deps.class::<#classes, #layout, #ic>(layout);)*
+                #(deps.operation::<#operations, #layout, #io>(layout);)*
+            }
+        }
+    };
     let mut names = std::collections::HashSet::new();
     let mut constants = Vec::new();
     for (index, slot) in slots.iter().enumerate() {
@@ -219,8 +233,8 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
         impl ::yield_vm::HostModule for #ty {
             const NAME: &'static str = #module;
             const SLOTS: &'static [::yield_vm::SlotDecl] = #decls;
-            #dependencies
         }
+        #registration
         #encode
         #decode
     })
@@ -268,26 +282,74 @@ pub(super) fn service_owner(
     vis: &Visibility,
     fields: Vec<ServiceField>,
 ) -> TokenStream {
+    use syn::fold::{self, Fold};
+
+    // Preserve `Self` from the accessor's impl when using the type outside it.
+    struct OwnerType<'a>(&'a Ident);
+    impl Fold for OwnerType<'_> {
+        fn fold_path(&mut self, mut path: Path) -> Path {
+            if path.leading_colon.is_none()
+                && let Some(segment) = path.segments.first_mut()
+                && segment.ident == "Self"
+            {
+                segment.ident = self.0.clone();
+            }
+            fold::fold_path(self, path)
+        }
+    }
+
+    let abi = quote!(::yield_vm::__macro_support);
+    let layout = Ident::new("__YieldLayout", MacroSpan::mixed_site());
+    let layout_value = Ident::new("__yield_layout", MacroSpan::mixed_site());
+    let indices: Vec<_> = (0..fields.len())
+        .map(|index| Ident::new(&format!("__YieldIndex{index}"), MacroSpan::mixed_site()))
+        .collect();
     let lifetime = syn::Lifetime::new("'__yield_service", MacroSpan::mixed_site());
-    let dependencies = fields.iter().map(|field| {
-        let name = &field.name;
-        quote!(::yield_vm::__macro_support::ServiceDependency::of_accessor(Self::#name))
-    });
-    let accessors = fields.iter().enumerate().map(|(index, ServiceField { name, ty })| {
+    let names: Vec<_> = fields.iter().map(|field| &field.name).collect();
+    let types: Vec<_> = fields
+        .iter()
+        .map(|field| OwnerType(ty).fold_type(field.ty.clone()))
+        .collect();
+    let (view, declaration, build, bounds) = if fields.is_empty() {
+        (quote!(()), quote!(), quote!(()), quote!())
+    } else {
+        let view = Ident::new(
+            &format!("__YieldServiceView_{}", ty.unraw()),
+            MacroSpan::mixed_site(),
+        );
+        (
+            quote!(#view),
+            quote! {
+                #[doc(hidden)]
+                #[allow(non_camel_case_types)]
+                #vis struct #view {
+                    #(#names: ::core::ptr::NonNull<#types>),*
+                }
+            },
+            quote!(#view {
+                #(#names: ::core::ptr::NonNull::from(<#layout as #abi::Provide<#types, #indices>>::provide(#layout_value))),*
+            }),
+            quote!(where #(#layout: #abi::Provide<#types, #indices>),*),
+        )
+    };
+    let accessors = fields.iter().map(|ServiceField { name, ty }| {
         quote! {
             #vis fn #name<#lifetime>(services: &::yield_vm::Services<#lifetime, Self>) -> &#lifetime #ty {
-                // SAFETY: metadata infers this return type from this accessor at the same index.
-                unsafe { services.__get(#index) }
+                // SAFETY: the binding owns this view and its layout for the borrow.
+                unsafe { services.__view().#name.as_ref() }
             }
         }
     });
     let accessors = (!fields.is_empty()).then(|| quote!(impl #ty { #(#accessors)* }));
     quote! {
-        // SAFETY: each accessor and its dependency share an index and type.
-        unsafe impl ::yield_vm::__macro_support::ServiceOwner for #ty {
-            const SERVICE_DEPENDENCIES: &'static [::yield_vm::__macro_support::ServiceDependency] = &[
-                #(#dependencies),*
-            ];
+        #declaration
+        // SAFETY: accessors only project shared fields of this owner's view.
+        unsafe impl #abi::ServiceOwner for #ty { type View = #view; }
+        // SAFETY: pointers are shared projections from the retained stable layout.
+        unsafe impl<#layout #(, #indices)*> #abi::BuildView<#layout, (#(#indices,)*)> for #ty
+        #bounds
+        {
+            fn build_view(#layout_value: &#layout) -> Self::View { #build }
         }
         #accessors
     }
@@ -416,6 +478,7 @@ pub(super) fn host(input: TokenStream, origin: Option<PathBuf>) -> Result<TokenS
     };
     let mut initializers = Vec::new();
     let mut custom_values = Vec::new();
+    let mut custom_types = Vec::new();
     let mut platform_values = BTreeMap::new();
     for (index, binding) in services.into_iter().enumerate() {
         let local = Ident::new(&format!("__yield_service{index}"), MacroSpan::mixed_site());
@@ -428,6 +491,7 @@ pub(super) fn host(input: TokenStream, origin: Option<PathBuf>) -> Result<TokenS
                 // Coerce at the user type before inferring the layout's parameters.
                 initializers.push(quote!(let #local: #ty = #value;));
                 custom_values.push(local);
+                custom_types.push(ty);
             }
         }
     }
@@ -440,10 +504,22 @@ pub(super) fn host(input: TokenStream, origin: Option<PathBuf>) -> Result<TokenS
         };
         quote!(#field: #value)
     });
-    let storage = if custom_values.is_empty() {
-        quote!(::core::result::Result::Ok(
-            ::yield_vm::__macro_support::ServiceStorage::default()
-        ))
+    let abi = quote!(::yield_vm::__macro_support);
+    let mutable = (!modules.is_empty()).then(|| quote!(mut));
+    let deps = Ident::new("__yield_deps", MacroSpan::mixed_site());
+    let modules_var = Ident::new("__yield_modules", MacroSpan::mixed_site());
+    let storage = Ident::new("__yield_storage", MacroSpan::mixed_site());
+    let borrowed = Ident::new("__yield_borrowed", MacroSpan::mixed_site());
+    let register = quote! {
+        let #mutable #deps = #abi::ModuleDependencies::default();
+        let #modules_var = [#(<#modules as #abi::RegisterFor<_, _>>::register_for(#borrowed, &mut #deps)),*];
+        (#modules_var, #deps)
+    };
+    let assembly = if custom_values.is_empty() {
+        quote! {{
+            let #borrowed = &();
+            (#abi::ServiceStorage::default(), { #register })
+        }}
     } else {
         let generated = |prefix: &str| -> Vec<Ident> {
             (0..custom_values.len())
@@ -453,53 +529,49 @@ pub(super) fn host(input: TokenStream, origin: Option<PathBuf>) -> Result<TokenS
         let fields = generated("__s");
         let params = generated("__T");
         let layout = Ident::new("__YieldServiceLayout", MacroSpan::mixed_site());
+        let providers = fields
+            .iter()
+            .zip(&params)
+            .enumerate()
+            .map(|(index, (field, ty))| {
+                quote! {
+                    impl<#(#params),*> ::yield_vm::__macro_support::Provide<
+                        #ty, ::yield_vm::__macro_support::Slot<#index>
+                    > for #layout<#(#params),*> {
+                        fn provide(&self) -> &#ty { &self.#field }
+                    }
+                }
+            });
+        let instance = Ident::new("__yield_layout", MacroSpan::mixed_site());
         quote! {{
             struct #layout<#(#params),*> {
                 #(#fields: #params),*
             }
+            #(#providers)*
             impl<#(#params: 'static),*> #layout<#(#params),*> {
-                fn into_storage(self) -> ::core::result::Result<
-                    ::yield_vm::__macro_support::ServiceStorage,
-                    ::std::string::String,
-                > {
-                    // SAFETY: these offsets and types describe the fields of the
-                    // same concrete layout instantiation passed to `from_layout`.
+                fn with_views<R>(self, build: impl FnOnce(&Self) -> R) -> (#abi::ServiceStorage, R) {
+                    // SAFETY: descriptors use the exact types and offsets of this layout.
                     unsafe {
-                        ::yield_vm::__macro_support::ServiceStorage::from_layout(self, [
-                            #(::yield_vm::__macro_support::ServiceField::of::<#params>(
-                                ::core::mem::offset_of!(Self, #fields)
-                            )),*
-                        ])
+                        #abi::ServiceStorage::with_layout(::std::boxed::Box::new(self), [
+                            #(#abi::ServiceField::of::<#params>(::core::mem::offset_of!(Self, #fields))),*
+                        ], build)
                     }
                 }
             }
-            #layout { #(#fields: #custom_values),* }.into_storage()
+            let #instance = #layout { #(#fields: #custom_values),* };
+            #(::yield_vm::__macro_support::assert_unique::<#custom_types, _, _>(&#instance);)*
+            #instance.with_views(|#borrowed| { #register })
         }}
     };
-    let mutable = (!modules.is_empty()).then(|| quote!(mut));
-    let deps = Ident::new("__yield_deps", MacroSpan::mixed_site());
-    let modules_var = Ident::new("__yield_modules", MacroSpan::mixed_site());
-    let services_var = Ident::new("__yield_services", MacroSpan::mixed_site());
-    let error = Ident::new("__yield_error", MacroSpan::mixed_site());
     Ok(quote! {
         {
             #declaration_validation
             #(#initializers)*
-            match #storage {
-                ::core::result::Result::Ok(#services_var) => {
-                    let #mutable #deps = <::yield_vm::__macro_support::ModuleDependencies as ::core::default::Default>::default();
-                    let #modules_var = [#(::yield_vm::__macro_support::module::<#modules>(&mut #deps)),*];
-                    ::yield_vm::__macro_support::link(
-                        #modules_var,
-                        #deps,
-                        #services_var,
-                        ::yield_vm::host::Platform { #(#platform_fields),* },
-                    )
-                }
-                ::core::result::Result::Err(#error) => {
-                    ::core::result::Result::Err(#error)
-                }
-            }
+            let (#storage, (#modules_var, #deps)) = #assembly;
+            let __yield_platform = ::yield_vm::host::Platform { #(#platform_fields),* };
+            // SAFETY: every view is paired with its owner and the stable layout
+            // used to build it (the empty layout is a promoted unit value).
+            unsafe { #abi::link(#modules_var, #deps, #storage, __yield_platform) }
         }
     })
 }
@@ -885,7 +957,7 @@ mod tests {
     }
 
     #[test]
-    fn owner_declarations_infer_service_type_from_accessor() {
+    fn owner_service_types_keep_the_declaration_scope() {
         let args = quote!(services = [clock: <Self as api::Config>::Clock, log: api::Log<Self>]);
         for expanded in [
             operation(
@@ -909,15 +981,11 @@ mod tests {
         ] {
             let output = expanded.unwrap().to_string();
             assert!(output.contains("ServiceOwner for Owner"));
-            assert!(output.contains("of_accessor (Self :: clock)"));
-            assert!(output.contains("of_accessor (Self :: log)"));
             assert!(output.contains("pub fn clock"));
             assert_eq!(
                 output.matches("< Self as api :: Config > :: Clock").count(),
                 1
             );
-            assert!(output.contains("services . __get (0usize)"));
-            assert!(output.contains("services . __get (1usize)"));
         }
     }
 
@@ -932,7 +1000,6 @@ mod tests {
         .unwrap()
         .to_string();
         assert!(output.contains("ServiceOwner for Empty"));
-        assert!(!output.contains("of_accessor"));
         for codec in ["Encode", "Decode"] {
             assert!(output.contains(&format!("{codec} < __YieldOwner > for Empty")));
         }

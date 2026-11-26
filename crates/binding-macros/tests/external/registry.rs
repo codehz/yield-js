@@ -1,5 +1,4 @@
 use super::{guest_build, start_vm};
-use std::any::type_name;
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -199,35 +198,7 @@ struct OtherClock(u64);
 type ClockAlias = Clock;
 
 #[test]
-fn validates_service_dependencies_of_selected_modules() -> Result<(), String> {
-    let missing = host! {
-        dts: "../dts/state.d.ts",
-        modules: [State],
-        services: {},
-    };
-    assert_eq!(
-        missing.err().unwrap(),
-        format!(
-            "host module {:?}: missing host service {:?}",
-            "state",
-            type_name::<Clock>()
-        )
-    );
-
-    let wrong_type = host! {
-        dts: "../dts/state.d.ts",
-        modules: [State],
-        services: { OtherClock => OtherClock(17) },
-    };
-    assert_eq!(
-        wrong_type.err().unwrap(),
-        format!(
-            "host module {:?}: missing host service {:?}",
-            "state",
-            type_name::<Clock>()
-        )
-    );
-
+fn binds_a_selected_modules_service_through_a_type_alias() -> Result<(), String> {
     let host = host! {
         dts: "../dts/state.d.ts",
         modules: [State],
@@ -282,20 +253,6 @@ fn registers_state_operation_and_services() -> Result<(), String> {
     assert_eq!(State::SLOTS[State::SLOT_HISTORY].name, "history");
     assert_eq!(Work::RECOVERY, Recovery::Pause);
     Ok(())
-}
-
-#[test]
-fn rejects_duplicate_service_registrations_through_a_type_alias() {
-    let duplicate = host! {
-        services: {
-            Clock => Clock(17),
-            ClockAlias => Clock(23),
-        },
-    };
-    assert_eq!(
-        duplicate.err().unwrap(),
-        format!("duplicate host service {:?}", type_name::<Clock>())
-    );
 }
 
 #[test]
@@ -367,7 +324,7 @@ impl LayoutModule {}
 #[operation(
     name = "probe-layout",
     recovery = pause,
-    services = [clock: Clock, aligned: AlignedService, marker: Marker],
+    services = [clock: Clock, same_clock: ClockAlias, aligned: AlignedService, marker: Marker],
 )]
 #[derive(Encode)]
 struct ProbeLayout;
@@ -376,9 +333,14 @@ impl Decode<ProbeLayout> for ProbeLayout {
     fn decode(input: &mut &[u8], services: &Services<'_, Self>) -> Result<Self, CodecError> {
         let clock = u64::decode(input, services)?;
         assert_eq!(Self::clock(services), &Clock(clock));
+        assert!(std::ptr::eq(
+            Self::clock(services),
+            Self::same_clock(services)
+        ));
         let aligned = Self::aligned(services);
         assert_eq!(std::ptr::from_ref(aligned).addr() % 128, 0);
         assert_eq!(aligned.0.get(), clock as u32);
+        aligned.0.set(clock as u32 + 1);
         let marker = std::hint::black_box(Self::marker(services));
         assert_eq!(std::mem::size_of_val(marker), 0);
         Ok(Self)
@@ -396,7 +358,7 @@ impl OperationDriver for ProbeLayout {
 }
 
 #[test]
-fn resolves_the_same_dependencies_against_each_host_layout() -> Result<(), String> {
+fn callbacks_borrow_services_from_their_own_host_layout() -> Result<(), String> {
     let wide_drops = Rc::new(Cell::new(17));
     let narrow_drops = Rc::new(Cell::new(23));
     let wide = host! {
@@ -418,40 +380,34 @@ fn resolves_the_same_dependencies_against_each_host_layout() -> Result<(), Strin
             AlignedService => AlignedService(Rc::clone(&narrow_drops)),
         },
     }?;
-    let decode = |host: &Host, clock: u64| {
+    for (host, expected) in [(&wide, &wide_drops), (&narrow, &narrow_drops)] {
+        assert!(Rc::ptr_eq(
+            &host.bind_service::<AlignedService>().unwrap().0,
+            expected
+        ));
+        assert!(host.bind_service::<Rc<Cell<u32>>>().is_none());
+    }
+    let decode = |host: &Host, clock: u64, expected: &Cell<u32>| {
         decode_operation(host, "probe-layout", &clock.to_le_bytes()).unwrap();
+        assert_eq!(expected.replace(clock as u32), clock as u32 + 1);
     };
-    decode(&wide, 17);
-    decode(&narrow, 23);
-    decode(&wide, 17);
+    decode(&wide, 17, &wide_drops);
+    decode(&narrow, 23, &narrow_drops);
+    decode(&wide, 17, &wide_drops);
     assert_eq!(wide_drops.get(), 17);
     assert_eq!(narrow_drops.get(), 23);
     drop(wide);
     assert_eq!(wide_drops.get(), 18);
-    decode(&narrow, 23);
-    drop(narrow);
+    decode(&narrow, 23, &narrow_drops);
+    let vm = start_vm(narrow, Default::default());
+    assert!(Rc::ptr_eq(
+        &vm.bind_service::<AlignedService>().unwrap().0,
+        &narrow_drops
+    ));
+    assert!(vm.bind_service::<Rc<Cell<u32>>>().is_none());
+    drop(vm);
     assert_eq!(narrow_drops.get(), 24);
     Ok(())
-}
-
-#[test]
-fn rejects_a_missing_required_layout_service_during_linking() {
-    let missing = host! {
-        dts: "../dts/empty.d.ts",
-        modules: [LayoutModule],
-        services: {
-            Clock => Clock(17),
-            AlignedService => AlignedService(Rc::new(Cell::new(0))),
-        },
-    };
-    assert_eq!(
-        missing.err().unwrap(),
-        format!(
-            "host operation {:?}: missing host service {:?}",
-            "probe-layout",
-            type_name::<Marker>(),
-        ),
-    );
 }
 
 struct DiagnosticCounter(Rc<Cell<u32>>);

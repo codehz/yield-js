@@ -56,27 +56,36 @@ fn task_host(labels: &Rc<LabelService>) -> Host<impl yield_vm::PlatformServices>
     struct TaskServices {
         labels: Rc<LabelService>,
     }
-    let layout = TaskServices {
+    impl abi::Provide<Rc<LabelService>, abi::Slot<0>> for TaskServices {
+        fn provide(&self) -> &Rc<LabelService> {
+            &self.labels
+        }
+    }
+
+    let layout = Box::new(TaskServices {
         labels: Rc::clone(labels),
-    };
-    // SAFETY: These descriptors use the exact types and offsets of the layout's fields.
-    let storage = unsafe {
-        abi::ServiceStorage::from_layout(
+    });
+    // SAFETY: the descriptor matches the field in TaskServices.
+    let (storage, deps) = unsafe {
+        abi::ServiceStorage::with_layout(
             layout,
             [abi::ServiceField::of::<Rc<LabelService>>(
                 std::mem::offset_of!(TaskServices, labels),
             )],
+            |layout| {
+                let mut deps = abi::ModuleDependencies::default();
+                deps.operation::<Wait, _, _>(layout);
+                deps
+            },
         )
-    }
-    .unwrap();
-    let mut deps = abi::ModuleDependencies::default();
-    deps.operation::<Wait>();
+    };
     let platform: yield_vm::Platform<yield_vm::Absent, yield_vm::Absent, TaskDiagnostics> =
         yield_vm::Platform {
             diagnostics: Some(TaskDiagnostics::default()),
             ..Default::default()
         };
-    abi::link([module], deps, storage, platform).unwrap()
+    // SAFETY: module has the unit view; Wait's view points into storage.
+    unsafe { abi::link([module], deps, storage, platform) }.unwrap()
 }
 
 static STAGES: [CpsStage; 2] = [
