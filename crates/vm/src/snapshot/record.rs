@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use bincode::Options;
 use serde::{Deserialize, Serialize};
@@ -6,11 +6,10 @@ use serde::{Deserialize, Serialize};
 use crate::JsString;
 use crate::binding::{NativeTarget, Recovery};
 use crate::bytecode::BYTECODE_VERSION;
-use crate::heap::{CombineState, GeneratorObject, Object};
+use crate::heap::{CombineState, GeneratorObject, Object, WeakKey};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 
-// DOMException records carry the shared [[ErrorData]] presence bit.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 96;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 97;
 
 /// Version for the binary envelope and bincode options, not the snapshot record layout.
 pub const SNAPSHOT_BINARY_VERSION: u32 = 1;
@@ -26,6 +25,8 @@ pub enum OrdinaryTask {
     StreamMessage(ObjectId, u64),
     /// One accepted adapter event, in delivery order.
     FetchEvent(u64, crate::fetch::FetchEvent),
+    /// Weak edge to a registry that still has uncleared cells.
+    FinalizationCleanup(ObjectId),
 }
 
 fn snapshot_codec() -> impl Options {
@@ -287,6 +288,8 @@ pub struct Snapshot {
     pub symbol_registry: BTreeMap<JsString, SymbolId>,
     /// Allocation high-water mark, preserved so restored ids stay fresh.
     pub next_symbol_id: SymbolId,
+    /// WeakRef targets kept alive until the next completed microtask checkpoint.
+    pub kept_objects: BTreeSet<WeakKey>,
 }
 
 impl Snapshot {
@@ -329,6 +332,7 @@ impl Snapshot {
             symbols: BTreeMap::new(),
             symbol_registry: BTreeMap::new(),
             next_symbol_id: 0,
+            kept_objects: BTreeSet::new(),
         }
     }
 

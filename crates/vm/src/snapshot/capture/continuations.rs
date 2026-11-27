@@ -260,7 +260,8 @@ pub(super) fn validate_rejection_notifications(
             OrdinaryTask::AbortTimeout(_)
             | OrdinaryTask::ScriptTimer(_)
             | OrdinaryTask::StreamMessage(..)
-            | OrdinaryTask::FetchEvent(..) => {}
+            | OrdinaryTask::FetchEvent(..)
+            | OrdinaryTask::FinalizationCleanup(_) => {}
             _ => return Err(VmError::InvalidSnapshot("invalid ordinary task".into())),
         }
     }

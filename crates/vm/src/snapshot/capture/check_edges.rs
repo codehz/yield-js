@@ -692,6 +692,42 @@ pub(super) fn check_heap_edges(
                     validate_weak_key(heap, "WeakSet", id, key)?;
                 }
             }
+            Object::WeakRef {
+                target: Some(key), ..
+            } => {
+                validate_weak_key(heap, "WeakRef", id, *key)?;
+            }
+            Object::WeakRef { .. } => {}
+            Object::FinalizationRegistry {
+                callback, cells, ..
+            } => {
+                let ValueRef::Object(callback_id) = callback.view() else {
+                    return Err(VmError::InvalidSnapshot(format!(
+                        "FinalizationRegistry {id} has a non-callable callback"
+                    )));
+                };
+                match heap.get(callback_id) {
+                    Ok(object) if is_callable_object(object) => {}
+                    _ => {
+                        return Err(VmError::InvalidSnapshot(format!(
+                            "FinalizationRegistry {id} has a non-callable callback"
+                        )));
+                    }
+                }
+                for cell in cells {
+                    if let Some(key) = cell.target {
+                        validate_weak_key(heap, "FinalizationRegistry", id, key)?;
+                        if crate::ops::same_value(&cell.held, &key.to_value()) {
+                            return Err(VmError::InvalidSnapshot(format!(
+                                "FinalizationRegistry {id} holds its own target"
+                            )));
+                        }
+                    }
+                    if let Some(key) = cell.token {
+                        validate_weak_key(heap, "FinalizationRegistry", id, key)?;
+                    }
+                }
+            }
             _ => {}
         }
         for edge in edges.drain(..) {
@@ -829,6 +865,48 @@ pub(super) fn check_heap_edges(
             current = next;
         }
         proxy_completed.extend(std::mem::take(&mut proxy_path));
+    }
+    Ok(())
+}
+
+pub(super) fn validate_kept_objects(
+    heap: &Heap,
+    kept: &std::collections::BTreeSet<crate::heap::WeakKey>,
+) -> Result<(), VmError> {
+    for &key in kept {
+        validate_weak_key(heap, "kept objects", 0, key)?;
+    }
+    Ok(())
+}
+
+pub(super) fn validate_finalization_tasks(
+    heap: &Heap,
+    tasks: &[crate::snapshot::OrdinaryTask],
+) -> Result<(), VmError> {
+    use crate::snapshot::OrdinaryTask;
+    let pending = crate::gc::pending_finalization_ids(heap.iter(), None);
+    let mut seen = std::collections::BTreeSet::new();
+    for task in tasks {
+        let OrdinaryTask::FinalizationCleanup(id) = *task else {
+            continue;
+        };
+        if !seen.insert(id) {
+            return Err(VmError::InvalidSnapshot(format!(
+                "duplicate finalization cleanup for {id}"
+            )));
+        }
+        if !pending.contains(&id) {
+            return Err(VmError::InvalidSnapshot(format!(
+                "finalization cleanup {id} is not a pending registry"
+            )));
+        }
+    }
+    for id in pending {
+        if !seen.contains(&id) {
+            return Err(VmError::InvalidSnapshot(format!(
+                "missing finalization cleanup for {id}"
+            )));
+        }
     }
     Ok(())
 }

@@ -5,7 +5,7 @@ use super::types::{
     AbortStep, ArrayBufferObject, BoundObject, BoxedPrimitive, CryptoKey, DataViewObject,
     DisposableResource, EnvironmentObject, EventTargetState, FunctionObject, IntegrityLevel,
     NativeObject, Object, OwnProperty, PromiseCallback, PromiseObject, PromiseState, Property,
-    PropertyTables, PropertyTablesMut, Resolution, TextDecoderObject, TypedArrayObject,
+    PropertyTables, PropertyTablesMut, Resolution, TextDecoderObject, TypedArrayObject, WeakKey,
     array_index, collect_own_keys,
 };
 use crate::ops::canonical_index_key;
@@ -150,6 +150,8 @@ macro_rules! map_object_storage {
             | Object::Set { object: $storage, .. }
             | Object::WeakMap { object: $storage, .. }
             | Object::WeakSet { object: $storage, .. }
+            | Object::WeakRef { object: $storage, .. }
+            | Object::FinalizationRegistry { object: $storage, .. }
             | Object::CollectionIterator { object: $storage, .. }
             | Object::ArrayIterator { object: $storage, .. }
             | Object::IteratorHelper { object: $storage, .. }
@@ -735,7 +737,16 @@ impl Object {
             | Self::UrlPattern { .. }
             | Self::WeakMap { .. }
             | Self::WeakSet { .. }
+            | Self::WeakRef { .. }
             | Self::StringIterator { .. } => {}
+            Self::FinalizationRegistry {
+                callback, cells, ..
+            } => {
+                push_value(out, callback);
+                for cell in cells {
+                    push_value(out, &cell.held);
+                }
+            }
             // Raw bytes are not heap edges; ordinary object storage is visited above.
             Self::ArrayBuffer(_) | Self::CryptoKey(_) => {}
             Self::RegExpStringIterator { regexp, .. } => out.push(OwnedEdge::Object(*regexp)),
@@ -837,6 +848,30 @@ impl Object {
                     push_value(out, value);
                 }
             }
+        }
+    }
+
+    /// Drop dead weak keys. Target/token become `None`; WeakMap/WeakSet entries are removed.
+    pub(crate) fn prune_weak_holdings(&mut self, live: impl Fn(WeakKey) -> bool) {
+        match self {
+            Self::WeakMap { entries, .. } => entries.retain(|key, _| live(*key)),
+            Self::WeakSet { entries, .. } => entries.retain(|key| live(*key)),
+            Self::WeakRef { target, .. } => {
+                if target.is_some_and(|key| !live(key)) {
+                    *target = None;
+                }
+            }
+            Self::FinalizationRegistry { cells, .. } => {
+                for cell in cells {
+                    if cell.target.is_some_and(|key| !live(key)) {
+                        cell.target = None;
+                    }
+                    if cell.token.is_some_and(|key| !live(key)) {
+                        cell.token = None;
+                    }
+                }
+            }
+            _ => {}
         }
     }
 }

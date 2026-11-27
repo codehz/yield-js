@@ -125,6 +125,7 @@ impl VmCore {
         snapshot.imports = self.imports.iter().map(|import| import.namespace).collect();
         snapshot.pending_rejection_notifications = self.pending_rejection_notifications.clone();
         snapshot.ordinary_tasks = self.ordinary_tasks.iter().cloned().collect();
+        snapshot.kept_objects = self.kept_objects.clone();
         snapshot.next_stream_message = self.next_stream_message;
         for (class, tag) in bindings.classes() {
             snapshot
@@ -155,22 +156,14 @@ impl VmCore {
                         binary_object_error(&self.heap, *id).expect("checked above"),
                     ));
                 }
-                Object::WeakMap { object, entries } => Object::WeakMap {
-                    object: object.clone(),
-                    entries: entries
-                        .iter()
-                        .filter(|(key, _)| live.contains_weak_key(**key))
-                        .map(|(&key, value)| (key, value.clone()))
-                        .collect(),
-                },
-                Object::WeakSet { object, entries } => Object::WeakSet {
-                    object: object.clone(),
-                    entries: entries
-                        .iter()
-                        .copied()
-                        .filter(|key| live.contains_weak_key(*key))
-                        .collect(),
-                },
+                object @ (Object::WeakMap { .. }
+                | Object::WeakSet { .. }
+                | Object::WeakRef { .. }
+                | Object::FinalizationRegistry { .. }) => {
+                    let mut object = object.clone();
+                    object.prune_weak_holdings(|key| live.contains_weak_key(key));
+                    object
+                }
                 Object::Environment(env) if !env.uninitialized.is_empty() => {
                     return Err(VmError::InvalidState(format!(
                         "environment {id} has uninitialized module bindings"
@@ -192,6 +185,34 @@ impl VmCore {
                         element: element.clone(),
                     },
                 ));
+            }
+        }
+        {
+            let pending = crate::gc::pending_finalization_ids(
+                snapshot
+                    .objects
+                    .iter()
+                    .map(|record| (record.id, &record.object)),
+                None,
+            );
+            snapshot.ordinary_tasks.retain(|task| match task {
+                OrdinaryTask::FinalizationCleanup(id) => pending.contains(id),
+                _ => true,
+            });
+            let queued: std::collections::BTreeSet<_> = snapshot
+                .ordinary_tasks
+                .iter()
+                .filter_map(|task| match task {
+                    OrdinaryTask::FinalizationCleanup(id) => Some(*id),
+                    _ => None,
+                })
+                .collect();
+            for id in pending {
+                if !queued.contains(&id) {
+                    snapshot
+                        .ordinary_tasks
+                        .push(OrdinaryTask::FinalizationCleanup(id));
+                }
             }
         }
         checkpoint(|profile| &mut profile.records);
@@ -574,6 +595,7 @@ impl VmCore {
         // Recovery can append new notifications; the captured ones must stay first.
         vm.pending_rejection_notifications = snapshot.pending_rejection_notifications;
         vm.ordinary_tasks = snapshot.ordinary_tasks.into();
+        vm.kept_objects = snapshot.kept_objects;
         // Accepted events run first; work that still depends on the old host
         // transport is interrupted locally without starting a new request.
         vm.start_fetch_interruptions(host)?;
@@ -582,6 +604,8 @@ impl VmCore {
         if AUDIT {
             validate_native_import_objects(&vm.heap, &vm.imports)?;
             check_heap_edges(&vm.build, &vm.heap, vm.builtins.get("globalThis"))?;
+            validate_kept_objects(&vm.heap, &vm.kept_objects)?;
+            validate_finalization_tasks(&vm.heap, vm.ordinary_tasks.make_contiguous())?;
             validate_jobs(&vm.heap)?;
             validate_combines(&vm.heap)?;
             checkpoint(|profile| &mut profile.graph_validation);

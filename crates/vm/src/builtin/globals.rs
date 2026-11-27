@@ -199,6 +199,8 @@ builtin_globals! {
     "crypto" => Global::Owner(super::crypto::BuiltinTable::<P>::OWNER),
     "SubtleCrypto" => Global::Owner(super::crypto::subtle::BuiltinTable::<P>::SUBTLE_OWNER),
     "CryptoKey" => Global::Owner(super::crypto::subtle::BuiltinTable::<P>::KEY_OWNER),
+    "WeakRef" => Global::Owner(collections::BuiltinTable::<P>::WEAK_REF_OWNER),
+    "FinalizationRegistry" => Global::Owner(collections::BuiltinTable::<P>::FINALIZATION_REGISTRY_OWNER),
 }
 
 pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);

@@ -218,6 +218,7 @@ impl VmCore {
         }
 
         let removed = self.heap.sweep(&live);
+        self.schedule_finalization_cleanup(&live.objects, self.delivering_finalization);
         for function in &mut self.property_caches {
             function.fill(crate::vm::PropertyCache::Empty);
         }
@@ -296,7 +297,15 @@ impl VmCore {
                 AbortTimeout(id) | RejectionHandled(id) => id.trace(&mut tracer)?,
                 StreamMessage(id, _) => id.trace(&mut tracer)?,
                 UnhandledBatch(batch) => batch.trace(&mut tracer)?,
-                ScriptTimer(_) | FetchEvent(..) => {}
+                ScriptTimer(_) | FetchEvent(..) | FinalizationCleanup(_) => {}
+            }
+        }
+        for key in &self.kept_objects {
+            match *key {
+                WeakKey::Object(id) => tracer.mark_object(id)?,
+                WeakKey::Symbol(id) => {
+                    tracer.live.symbols.insert(id);
+                }
             }
         }
         for timer in self.script_timers.values() {
@@ -366,6 +375,58 @@ impl VmCore {
         tracer.mark_ephemerons()?;
         Ok(tracer.live)
     }
+
+    pub(crate) fn schedule_finalization_cleanup(
+        &mut self,
+        live_objects: &BTreeSet<ObjectId>,
+        skip: Option<ObjectId>,
+    ) {
+        let pending = pending_finalization_ids(
+            live_objects
+                .iter()
+                .filter_map(|&id| self.heap.get(id).ok().map(|object| (id, object))),
+            skip,
+        );
+        self.ordinary_tasks.retain(|task| match task {
+            crate::snapshot::OrdinaryTask::FinalizationCleanup(id) => pending.contains(id),
+            _ => true,
+        });
+        let queued: BTreeSet<ObjectId> = self
+            .ordinary_tasks
+            .iter()
+            .filter_map(|task| match task {
+                crate::snapshot::OrdinaryTask::FinalizationCleanup(id) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        for id in pending {
+            if !queued.contains(&id) {
+                self.ordinary_tasks
+                    .push_back(crate::snapshot::OrdinaryTask::FinalizationCleanup(id));
+            }
+        }
+    }
+}
+
+pub(crate) fn pending_finalization_ids<'a>(
+    objects: impl Iterator<Item = (ObjectId, &'a Object)>,
+    skip: Option<ObjectId>,
+) -> BTreeSet<ObjectId> {
+    objects
+        .filter_map(|(id, object)| {
+            if Some(id) == skip {
+                return None;
+            }
+            match object {
+                Object::FinalizationRegistry { cells, .. }
+                    if cells.iter().any(|cell| cell.target.is_none()) =>
+                {
+                    Some(id)
+                }
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 pub(crate) struct Tracer<'a> {

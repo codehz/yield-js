@@ -169,6 +169,8 @@ impl VmCore {
             operations: BTreeMap::new(),
             recovered_operations: BTreeSet::new(),
             ordinary_tasks: VecDeque::new(),
+            kept_objects: BTreeSet::new(),
+            delivering_finalization: None,
             next_stream_message: 0,
             script_timers: BTreeMap::new(),
             console: Default::default(),

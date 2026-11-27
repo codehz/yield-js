@@ -61,7 +61,7 @@ Blitz 演示入口只编译 `src/blitz.jsx` 及其依赖。CSS Modules 不支持
 
 Node 扩展名加载器只接收 UTF-8 文本，不支持直接加载二进制文件；内嵌 preload 不是虚拟文件系统，不向普通导入注册别名。
 
-未提供的全局名包括 `WeakRef`、`FinalizationRegistry`、`SharedArrayBuffer`、`Atomics` 和 `Intl`。`Temporal` 与 `Iterator.zip` / `Iterator.zipKeyed` 等新增迭代器方法不属于 ES2026。
+未提供的全局名包括 `SharedArrayBuffer`、`Atomics` 和 `Intl`。`Temporal` 与 `Iterator.zip` / `Iterator.zipKeyed` 等新增迭代器方法不属于 ES2026。
 
 ## 5. 结构性缺口
 
@@ -85,7 +85,7 @@ Node 扩展名加载器只接收 UTF-8 文本，不支持直接加载二进制�
 - 不支持运行时加载或编译代码。动态 `import()` 只接受字符串字面量，按依赖图提前求值，不保留惰性加载或原生动态导入时序。内建 `eval` 无论输入为何均抛 `EvalError`，调用或构造内建 `Function` 均抛 `TypeError`。
 - 导入/导出属性仍在编译期拒绝。`import.meta` 仅折叠宿主在打包期注入的完整静态路径常量，不提供对象、`resolve` 或运行时 URL 推导。跨模块读取有运行时 TDZ 检查，不改变普通函数的 TDZ 规则。
 - `debugger`：不在首版语法表
-- `WeakRef`、`FinalizationRegistry`、共享内存、`Atomics`
+- 共享内存、`Atomics`
 - 旧式 `Object.prototype.__proto__` 访问器；保留 `Object` / `Reflect` 的显式原型操作。
 - 快照迁移：恢复要求 `SNAPSHOT_FORMAT_VERSION`、`BYTECODE_VERSION`、`build_id` 和宿主绑定指纹均匹配；二进制镜像还要求当前 `SNAPSHOT_BINARY_VERSION`，不做容器迁移。
 - 产物迁移：`Build::from_bytes` 只接受当前 `BUILD_FORMAT_VERSION` 与当前 bincode 编码，不读取版本 1 的无资源容器或旧 JSON 产物。VM 不解析资源 URI 或内容，不加载或分派资源。

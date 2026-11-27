@@ -205,6 +205,8 @@ pub(crate) fn kind(object: &Object) -> &'static str {
         Object::Set { .. } => "Set",
         Object::WeakMap { .. } => "WeakMap",
         Object::WeakSet { .. } => "WeakSet",
+        Object::WeakRef { .. } => "WeakRef",
+        Object::FinalizationRegistry { .. } => "FinalizationRegistry",
         Object::DisposableStack { async_: true, .. } => "AsyncDisposableStack",
         Object::DisposableStack { .. } => "DisposableStack",
         Object::DomException { .. } => "DOMException",

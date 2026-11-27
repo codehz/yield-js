@@ -28,3 +28,4 @@ mod timer_faults;
 mod timer_roots;
 mod timers;
 mod validation;
+mod weak_refs;

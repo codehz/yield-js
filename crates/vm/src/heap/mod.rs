@@ -34,11 +34,11 @@ pub use types::{
     AsyncCompletion, AsyncRequest, BoundObject, BoxedPrimitive, ByteStreamRange,
     CollectionIteration, CollectionKind, CombineKind, CombineState, DataViewObject,
     DisposableResource, DisposeHint, DisposeState, ElementKind, EnvironmentObject, EventListener,
-    EventPayload, EventState, EventTargetState, FunctionObject, GeneratorObject, GeneratorStatus,
-    NativeObject, Object, PlainObject, PromiseCallback, PromiseObject, PromiseState, Property,
-    PropertyTable, PullInto, PullIntoReader, ReadableByteState, ReadableReaderObject,
-    ReadableState, ReadableStreamObject, RejectionStatus, Resolution, TextDecoderObject,
-    TextEncoding, TypedArrayObject, WeakKey,
+    EventPayload, EventState, EventTargetState, FinalizationCell, FunctionObject, GeneratorObject,
+    GeneratorStatus, NativeObject, Object, PlainObject, PromiseCallback, PromiseObject,
+    PromiseState, Property, PropertyTable, PullInto, PullIntoReader, ReadableByteState,
+    ReadableReaderObject, ReadableState, ReadableStreamObject, RejectionStatus, Resolution,
+    TextDecoderObject, TextEncoding, TypedArrayObject, WeakKey,
 };
 pub use types::{CryptoKey, CryptoKeyAlgorithm, CryptoKeyUsage};
 pub use types::{TextDecoderConfig, TransformAlgorithms, TransformStage, TransformStreamObject};

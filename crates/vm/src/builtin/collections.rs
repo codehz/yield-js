@@ -5,8 +5,8 @@ use crate::builtin::{RootKind, RootSpec, define_builtin_data, link_constructor};
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{
-    Attributes, CollectionIteration, CollectionKind, ITERATOR_SYMBOL, Object, PlainObject,
-    TO_STRING_TAG_SYMBOL,
+    Attributes, CollectionIteration, CollectionKind, FinalizationCell, ITERATOR_SYMBOL, Object,
+    PlainObject, TO_STRING_TAG_SYMBOL,
 };
 use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
@@ -68,6 +68,9 @@ const MAP: IntrinsicKey = IntrinsicKey::new("Map", Slot::Global, "");
 const SET: IntrinsicKey = IntrinsicKey::new("Set", Slot::Global, "");
 const WEAK_MAP: IntrinsicKey = IntrinsicKey::new("WeakMap", Slot::Global, "");
 const WEAK_SET: IntrinsicKey = IntrinsicKey::new("WeakSet", Slot::Global, "");
+const WEAK_REF: IntrinsicKey = IntrinsicKey::new("WeakRef", Slot::Global, "");
+const FINALIZATION_REGISTRY: IntrinsicKey =
+    IntrinsicKey::new("FinalizationRegistry", Slot::Global, "");
 const INVALID_WEAK_KEY: &str = "weak collection key must be an object or non-registered symbol";
 
 impl<P: crate::host::PlatformServices> BuiltinTable<P> {
@@ -138,6 +141,52 @@ impl<P: crate::host::PlatformServices> BuiltinTable<P> {
         }),
     );
 }
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const WEAK_REF_OWNER: Owner<P> = Owner::new(
+        weak_ref_members::ROOT,
+        WEAK_REF_ROOTS,
+        &[
+            Self::WEAK_REF_INTRINSICS,
+            weak_ref_members::Globals::<P>::INTRINSICS,
+        ],
+        Some(|vm, _| {
+            let constructor = vm.builtins.get("weakref");
+            let prototype = vm.builtins.get("weakref.prototype");
+            link_constructor(vm, constructor, prototype);
+            weak_ref_members::install_members(vm, constructor, prototype);
+            define_builtin_data(
+                vm,
+                prototype,
+                PropertyKey::Symbol(TO_STRING_TAG_SYMBOL),
+                Value::string("WeakRef".into()),
+                Attributes::FUNCTION_METADATA,
+            );
+        }),
+    );
+}
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    pub(crate) const FINALIZATION_REGISTRY_OWNER: Owner<P> = Owner::new(
+        finalization_registry_members::ROOT,
+        FINALIZATION_REGISTRY_ROOTS,
+        &[
+            Self::FINALIZATION_REGISTRY_INTRINSICS,
+            finalization_registry_members::Globals::<P>::INTRINSICS,
+        ],
+        Some(|vm, _| {
+            let constructor = vm.builtins.get("finalizationregistry");
+            let prototype = vm.builtins.get("finalizationregistry.prototype");
+            link_constructor(vm, constructor, prototype);
+            finalization_registry_members::install_members(vm, constructor, prototype);
+            define_builtin_data(
+                vm,
+                prototype,
+                PropertyKey::Symbol(TO_STRING_TAG_SYMBOL),
+                Value::string("FinalizationRegistry".into()),
+                Attributes::FUNCTION_METADATA,
+            );
+        }),
+    );
+}
 
 pub(crate) const MAP_ROOTS: &[RootSpec] = &[
     RootSpec::new("map", RootKind::Native(MAP), Some("function.prototype")).fixed("map.prototype"),
@@ -179,6 +228,32 @@ const WEAK_SET_ROOTS: &[RootSpec] = &[
     .fixed("weakset.prototype"),
     RootSpec::new(
         "weakset.prototype",
+        RootKind::Plain,
+        Some("object.prototype"),
+    ),
+];
+pub(crate) const WEAK_REF_ROOTS: &[RootSpec] = &[
+    RootSpec::new(
+        "weakref",
+        RootKind::Native(WEAK_REF),
+        Some("function.prototype"),
+    )
+    .fixed("weakref.prototype"),
+    RootSpec::new(
+        "weakref.prototype",
+        RootKind::Plain,
+        Some("object.prototype"),
+    ),
+];
+const FINALIZATION_REGISTRY_ROOTS: &[RootSpec] = &[
+    RootSpec::new(
+        "finalizationregistry",
+        RootKind::Native(FINALIZATION_REGISTRY),
+        Some("function.prototype"),
+    )
+    .fixed("finalizationregistry.prototype"),
+    RootSpec::new(
+        "finalizationregistry.prototype",
         RootKind::Plain,
         Some("object.prototype"),
     ),
@@ -371,6 +446,42 @@ impl<P: crate::host::PlatformServices> BuiltinTable<P> {
         1,
         |vm, _, roots, _, _| vm.throw_type_error(roots, "WeakSet requires new"),
         |vm, host, roots, args, prototype| vm.construct_weakset(host, roots, &args, prototype),
+    )];
+}
+#[yield_binding_macros::builtin_global(name = "WeakRef", root = "weakref", kind = "constructor")]
+mod weak_ref_members {
+    prototype_calls! {
+        deref: 0 => |vm, _, roots, _, receiver| vm.weakref_deref(roots, receiver);
+    }
+}
+
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    const WEAK_REF_INTRINSICS: &[IntrinsicDef<P>] = &[IntrinsicDef::constructor(
+        WEAK_REF,
+        1,
+        |vm, _, roots, _, _| vm.throw_type_error(roots, "WeakRef requires new"),
+        |vm, _, roots, args, prototype| vm.construct_weakref(roots, &args, prototype),
+    )];
+}
+
+#[yield_binding_macros::builtin_global(
+    name = "FinalizationRegistry",
+    root = "finalizationregistry",
+    kind = "constructor"
+)]
+mod finalization_registry_members {
+    prototype_calls! {
+        register: 2 => |vm, _, roots, args, receiver| vm.finalization_register(roots, receiver, &args);
+        unregister: 1 => |vm, _, roots, args, receiver| vm.finalization_unregister(roots, receiver, &args);
+    }
+}
+
+impl<P: crate::host::PlatformServices> BuiltinTable<P> {
+    const FINALIZATION_REGISTRY_INTRINSICS: &[IntrinsicDef<P>] = &[IntrinsicDef::constructor(
+        FINALIZATION_REGISTRY,
+        1,
+        |vm, _, roots, _, _| vm.throw_type_error(roots, "FinalizationRegistry requires new"),
+        |vm, _, roots, args, prototype| vm.construct_finalization_registry(roots, &args, prototype),
     )];
 }
 
@@ -612,6 +723,146 @@ impl VmCore {
             WeakSetMethod::Has => Value::boolean(entries.contains(&key)),
             WeakSetMethod::Delete => Value::boolean(entries.remove(&key)),
         }))
+    }
+
+    fn construct_weakref(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        args: &[Value],
+        prototype: Option<ObjectId>,
+    ) -> Result<Invocation, VmError> {
+        let undefined = Value::UNDEFINED;
+        let target = args.first().unwrap_or(&undefined);
+        let Some(key) = self.heap.weak_key(target) else {
+            return self.throw_type_error(roots, INVALID_WEAK_KEY);
+        };
+        let prototype = prototype.unwrap_or_else(|| self.builtins.get("weakref.prototype"));
+        self.kept_objects.insert(key);
+        Ok(Invocation::Value(Value::object(self.heap.alloc(
+            Object::WeakRef {
+                object: PlainObject::new(Some(prototype)),
+                target: Some(key),
+            },
+        ))))
+    }
+
+    fn weakref_deref(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        receiver: &Value,
+    ) -> Result<Invocation, VmError> {
+        let ValueRef::Object(id) = receiver.view() else {
+            return self.throw_type_error(roots, "incompatible WeakRef receiver");
+        };
+        let Object::WeakRef { target, .. } = self.heap.get(id)? else {
+            return self.throw_type_error(roots, "incompatible WeakRef receiver");
+        };
+        Ok(Invocation::Value(match *target {
+            None => Value::UNDEFINED,
+            Some(key) => {
+                self.kept_objects.insert(key);
+                key.to_value()
+            }
+        }))
+    }
+
+    fn construct_finalization_registry(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        args: &[Value],
+        prototype: Option<ObjectId>,
+    ) -> Result<Invocation, VmError> {
+        let undefined = Value::UNDEFINED;
+        let callback = args.first().unwrap_or(&undefined);
+        if !self.is_callable(callback) {
+            return self.throw_type_error(roots, "FinalizationRegistry callback is not callable");
+        }
+        let prototype =
+            prototype.unwrap_or_else(|| self.builtins.get("finalizationregistry.prototype"));
+        Ok(Invocation::Value(Value::object(self.heap.alloc(
+            Object::FinalizationRegistry {
+                object: PlainObject::new(Some(prototype)),
+                callback: callback.clone(),
+                cells: Vec::new(),
+            },
+        ))))
+    }
+
+    fn finalization_register(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        receiver: &Value,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        let ValueRef::Object(id) = receiver.view() else {
+            return self.throw_type_error(roots, "incompatible FinalizationRegistry receiver");
+        };
+        if !matches!(self.heap.get(id)?, Object::FinalizationRegistry { .. }) {
+            return self.throw_type_error(roots, "incompatible FinalizationRegistry receiver");
+        }
+        let undefined = Value::UNDEFINED;
+        let target = args.first().unwrap_or(&undefined);
+        let Some(target_key) = self.heap.weak_key(target) else {
+            return self.throw_type_error(roots, INVALID_WEAK_KEY);
+        };
+        let held = args.get(1).cloned().unwrap_or(Value::UNDEFINED);
+        if crate::ops::same_value(target, &held) {
+            return self.throw_type_error(roots, "held value cannot be the target");
+        }
+        let token = match args.get(2) {
+            None => None,
+            Some(value) if matches!(value.view(), ValueRef::Undefined) => None,
+            Some(value) => {
+                let Some(key) = self.heap.weak_key(value) else {
+                    return self.throw_type_error(roots, INVALID_WEAK_KEY);
+                };
+                Some(key)
+            }
+        };
+        let Object::FinalizationRegistry { cells, .. } = self.heap.get_mut(id)? else {
+            unreachable!("receiver brand already checked");
+        };
+        cells.push(FinalizationCell {
+            target: Some(target_key),
+            held,
+            token,
+        });
+        Ok(Invocation::Value(Value::UNDEFINED))
+    }
+
+    fn finalization_unregister(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        receiver: &Value,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        let ValueRef::Object(id) = receiver.view() else {
+            return self.throw_type_error(roots, "incompatible FinalizationRegistry receiver");
+        };
+        if !matches!(self.heap.get(id)?, Object::FinalizationRegistry { .. }) {
+            return self.throw_type_error(roots, "incompatible FinalizationRegistry receiver");
+        }
+        let undefined = Value::UNDEFINED;
+        let token = args.first().unwrap_or(&undefined);
+        let Some(token) = self.heap.weak_key(token) else {
+            return self.throw_type_error(roots, INVALID_WEAK_KEY);
+        };
+        let Object::FinalizationRegistry { cells, .. } = self.heap.get_mut(id)? else {
+            unreachable!("receiver brand already checked");
+        };
+        let before = cells.len();
+        cells.retain(|cell| cell.token != Some(token));
+        let removed = cells.len() != before;
+        let pending = cells.iter().any(|cell| cell.target.is_none());
+        if !pending {
+            self.ordinary_tasks.retain(|task| {
+                !matches!(
+                    task,
+                    crate::snapshot::OrdinaryTask::FinalizationCleanup(queued) if *queued == id
+                )
+            });
+        }
+        Ok(Invocation::Value(Value::boolean(removed)))
     }
 
     fn construct_collection<P: PlatformServices>(

@@ -52,7 +52,7 @@ async generator 复用同一套挂起指令；`yield` 的操作数先按 `await`
 - 支持 `Symbol`（含 `Symbol.for/keyFor`、`Symbol.iterator`、`Symbol.asyncIterator`、`Symbol.dispose`、`Symbol.asyncDispose`）、同步与异步 iterator 协议、生成器与 async generator 的原型、`Map`、`Set`、`WeakMap`。快照保存 symbol 注册表和引用身份、集合条目与顺序；`WeakMap` 遵循弱键/ephemeron 可达性，只存活键所对应的条目，不能把键提升成强根。
 - 框架验收用例需要真正的 VM `Proxy`：首版覆盖普通对象/数组（以及 Date、ArrayBuffer、DataView、TypedArray）目标的 `get`、`set`、`has`、`deleteProperty`、`ownKeys`、`getOwnPropertyDescriptor` 陷阱及相应 `Reflect` 操作；遵守属性描述符与不可扩展目标不变量。快照保存代理、目标、handler 及其捕获环境的身份和关系，不执行 trap 来枚举快照。可撤销代理、代理函数/构造器及其他 traps 不在此基线。
 - `for…in` 到达每一原型层时才取得该层的自有键列表；逐键检查时读取实时描述符，不提前读取属性值。快照保存已经记录的键及枚举进度，恢复时不重跑该层的 `ownKeys`。
-- `Promise` 由 VM 实现：构造器、`then/catch/finally`、`resolve/reject/all/allSettled/race/any`。快照保留未结算 Promise 的反应闭包、链式结果与 async 续体；不序列化宿主 Promise。`queueMicrotask` 进入同一 VM 微任务队列，不是宿主 timer。`WeakRef`、`FinalizationRegistry`、共享内存、`Atomics` 不在此基线。
+- `Promise` 由 VM 实现：构造器、`then/catch/finally`、`resolve/reject/all/allSettled/race/any`。快照保留未结算 Promise 的反应闭包、链式结果与 async 续体；不序列化宿主 Promise。`queueMicrotask` 进入同一 VM 微任务队列，不是宿主 timer。`WeakRef` 与 `FinalizationRegistry` 由 VM 实现：目标与 token 是弱边，held 与 callback 是强边；检查点保活集把本轮 `WeakRef` 构造和成功 `deref` 的目标当作强根，在微任务检查点排空后清空。快照保存保活集与待清理任务，捕获裁剪失活弱边且不改源 VM，恢复不执行回调。共享内存、`Atomics` 不在此基线。
 
 ### BigInt
 

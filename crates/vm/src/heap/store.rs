@@ -113,15 +113,7 @@ impl Heap {
                 return false;
             }
             object.prune_weak_abort_edges(&live.objects);
-            match object {
-                Object::WeakMap { entries, .. } => {
-                    entries.retain(|key, _| live.contains_weak_key(*key));
-                }
-                Object::WeakSet { entries, .. } => {
-                    entries.retain(|key| live.contains_weak_key(*key));
-                }
-                _ => {}
-            }
+            object.prune_weak_holdings(|key| live.contains_weak_key(key));
             true
         });
         self.combines.retain(|id, _| live.objects.contains(id));
@@ -780,6 +772,8 @@ impl Heap {
             | Object::Set { object: plain, .. }
             | Object::WeakMap { object: plain, .. }
             | Object::WeakSet { object: plain, .. }
+            | Object::WeakRef { object: plain, .. }
+            | Object::FinalizationRegistry { object: plain, .. }
             | Object::CollectionIterator { object: plain, .. }
             | Object::ArrayIterator { object: plain, .. }
             | Object::IteratorHelper { object: plain, .. }

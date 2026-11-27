@@ -12,7 +12,7 @@ use crate::frame::Frame;
 use crate::gc::ActiveRoots;
 use crate::heap::EventPayload;
 use crate::heap::HostClassRecord;
-use crate::heap::{Attributes, Heap, PromiseState, ReactionJob, RejectionStatus};
+use crate::heap::{Attributes, Heap, PromiseState, ReactionJob, RejectionStatus, WeakKey};
 use crate::host::{Completion, Diagnostics, Host, Platform, PlatformServices, TimerService};
 use crate::intrinsic::{ClassArgs, ClassDef};
 use crate::intrinsics::{Error, IntrinsicClass};
@@ -610,6 +610,9 @@ pub(crate) struct VmCore {
     /// been handed to the host yet. Drained by `start_recovered_operations`.
     pub(crate) recovered_operations: BTreeSet<u64>,
     pub(crate) ordinary_tasks: VecDeque<OrdinaryTask>,
+    pub(crate) kept_objects: BTreeSet<WeakKey>,
+    /// Registry currently delivering callbacks; GC must not requeue it.
+    pub(crate) delivering_finalization: Option<ObjectId>,
     pub(crate) next_stream_message: u64,
     pub(crate) script_timers: BTreeMap<i32, ScriptTimer>,
     pub(crate) console: crate::console::ConsoleState,
@@ -1203,6 +1206,7 @@ impl VmCore {
                     self.run_rejection_notification(host, &ActiveRoots::EMPTY, id, true)?
                 }
                 OrdinaryTask::FetchEvent(id, event) => self.process_fetch_event(host, id, event)?,
+                OrdinaryTask::FinalizationCleanup(id) => self.run_finalization_cleanup(host, id)?,
             }
         }
     }
@@ -1288,6 +1292,7 @@ impl VmCore {
                     &mut self.pending_rejection_notifications,
                 )));
         }
+        self.kept_objects.clear();
         Ok(())
     }
 
@@ -1309,6 +1314,64 @@ impl VmCore {
             }
         }
         Ok(())
+    }
+
+    fn run_finalization_cleanup<P: PlatformServices>(
+        &mut self,
+        host: &Host<P>,
+        id: ObjectId,
+    ) -> Result<(), VmError> {
+        if !matches!(
+            self.heap.get(id),
+            Ok(crate::heap::Object::FinalizationRegistry { .. })
+        ) {
+            return Ok(());
+        }
+        self.delivering_finalization = Some(id);
+        let registry = Value::object(id);
+        let result = (|| {
+            loop {
+                let (callback, held) = {
+                    let crate::heap::Object::FinalizationRegistry {
+                        callback, cells, ..
+                    } = self.heap.get_mut(id)?
+                    else {
+                        return Ok(());
+                    };
+                    let Some(index) = cells.iter().position(|cell| cell.target.is_none()) else {
+                        return Ok(());
+                    };
+                    let cell = cells.remove(index);
+                    (callback.clone(), cell.held)
+                };
+                let roots = ActiveRoots::EMPTY.with(&registry);
+                let roots = roots.with(&callback);
+                let roots = roots.with(&held);
+                match self.invoke(
+                    host,
+                    &roots,
+                    &callback,
+                    Arguments::Values(std::slice::from_ref(&held)),
+                    &Value::UNDEFINED,
+                )? {
+                    Invocation::Thrown(error) => {
+                        if matches!(
+                            self.heap.get(id),
+                            Ok(crate::heap::Object::FinalizationRegistry { cells, .. })
+                                if cells.iter().any(|cell| cell.target.is_none())
+                        ) {
+                            self.ordinary_tasks
+                                .push_back(OrdinaryTask::FinalizationCleanup(id));
+                        }
+                        self.report_exception(host, &roots, error)?;
+                        return Ok(());
+                    }
+                    Invocation::Value(_) => {}
+                }
+            }
+        })();
+        self.delivering_finalization = None;
+        result
     }
 
     fn run_rejection_notification<P: PlatformServices>(
@@ -2017,6 +2080,8 @@ impl VmCore {
             next_host_task_id,
             recovered_operations,
             ordinary_tasks: VecDeque::new(),
+            kept_objects: BTreeSet::new(),
+            delivering_finalization: None,
             next_stream_message,
             script_timers,
             console,

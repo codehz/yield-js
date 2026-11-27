@@ -1480,6 +1480,24 @@ pub enum WeakKey {
     Symbol(SymbolId),
 }
 
+impl WeakKey {
+    pub(crate) fn to_value(self) -> Value {
+        match self {
+            Self::Object(id) => Value::object(id),
+            Self::Symbol(id) => Value::symbol(id),
+        }
+    }
+}
+
+/// One FinalizationRegistry registration. `target == None` means the target
+/// is already dead and the held value is waiting for cleanup.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FinalizationCell {
+    pub target: Option<WeakKey>,
+    pub held: Value,
+    pub token: Option<WeakKey>,
+}
+
 impl std::fmt::Display for WeakKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1994,6 +2012,15 @@ pub enum Object {
         object: PlainObject,
         entries: BTreeSet<WeakKey>,
     },
+    WeakRef {
+        object: PlainObject,
+        target: Option<WeakKey>,
+    },
+    FinalizationRegistry {
+        object: PlainObject,
+        callback: Value,
+        cells: Vec<FinalizationCell>,
+    },
     CollectionIterator {
         object: PlainObject,
         kind: CollectionKind,
@@ -2343,6 +2370,28 @@ impl PartialEq for Object {
                     entries: b,
                 },
             ) => x == y && a == b,
+            (
+                WeakRef {
+                    object: x,
+                    target: a,
+                },
+                WeakRef {
+                    object: y,
+                    target: b,
+                },
+            ) => x == y && a == b,
+            (
+                FinalizationRegistry {
+                    object: x,
+                    callback: a,
+                    cells: c,
+                },
+                FinalizationRegistry {
+                    object: y,
+                    callback: b,
+                    cells: d,
+                },
+            ) => x == y && a == b && c == d,
             (
                 Set {
                     object: x,
