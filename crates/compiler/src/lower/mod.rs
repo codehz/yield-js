@@ -39,6 +39,7 @@ use control::Control;
 pub(crate) fn lower_graph<'ast>(
     graph: &'ast ModuleGraph<'ast>,
     options: &crate::Compiler,
+    import_meta: Option<&crate::ImportMetaLookup<'_>>,
 ) -> Result<Build, CompileError> {
     let mut session = Session::new();
     // Reserve graph-wide binding IDs before lowering the first declaration.
@@ -89,6 +90,7 @@ pub(crate) fn lower_graph<'ast>(
         let result = (|| {
             let scope = ModuleScope {
                 index,
+                id: module.id.as_str(),
                 source,
                 stack_traces: options.stack_traces && !module.is_framework,
                 entry: index == graph.entry,
@@ -110,6 +112,7 @@ pub(crate) fn lower_graph<'ast>(
                 } else {
                     preload_names
                 },
+                import_meta,
             };
             let declaration = session.alloc_func_id(source, Span::default())?;
             let (evaluation, name) = if index == graph.entry {
@@ -160,6 +163,7 @@ pub(crate) fn lower_graph<'ast>(
 
 struct ModuleScope<'src> {
     index: u32,
+    id: &'src str,
     source: &'src str,
     stack_traces: bool,
     entry: bool,
@@ -168,6 +172,7 @@ struct ModuleScope<'src> {
     imports: BTreeMap<String, ModuleTarget>,
     dynamic_imports: BTreeMap<&'src str, u32>,
     preload: Option<&'src BTreeMap<String, Target>>,
+    import_meta: Option<&'src crate::ImportMetaLookup<'src>>,
 }
 
 #[derive(Default)]

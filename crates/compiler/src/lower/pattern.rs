@@ -88,6 +88,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 return self.assignment_binding(id);
             }
             if let Some(member) = target.as_member_expression() {
+                self.reject_import_meta_member(member)?;
                 return Ok(Destination::Member(self.compile_member_ref(member, None)?));
             }
         }

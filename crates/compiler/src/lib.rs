@@ -55,6 +55,8 @@ pub use transform::{
 /// A stable, nonempty canonical source module identity.
 pub type ModuleId = String;
 
+pub(crate) type ImportMetaLookup<'a> = dyn Fn(&str, &[&str]) -> Option<yield_vm::ConstValue> + 'a;
+
 /// Source roots, resolver and transforms for one build.
 pub struct Project<'a> {
     pub entry: ModuleId,
@@ -64,6 +66,7 @@ pub struct Project<'a> {
     sources: Vec<Box<dyn SourceTransform + 'a>>,
     graphs: Vec<Box<dyn GraphTransform + 'a>>,
     builds: Vec<Box<dyn BuildTransform + 'a>>,
+    import_meta: Option<Box<ImportMetaLookup<'a>>>,
 }
 
 impl<'a> Project<'a> {
@@ -76,6 +79,7 @@ impl<'a> Project<'a> {
             sources: Vec::new(),
             graphs: Vec::new(),
             builds: Vec::new(),
+            import_meta: None,
         }
     }
 
@@ -114,6 +118,18 @@ impl<'a> Project<'a> {
 
     pub fn with_build_transform(mut self, transform: impl BuildTransform + 'a) -> Self {
         self.builds.push(Box::new(transform));
+        self
+    }
+
+    /// Pack-time `import.meta` lookup. The first argument is the defining
+    /// module's canonical id; the second is the property path from root to leaf.
+    /// Replacing the callback discards the previous one. Same inputs must yield
+    /// a stable `ConstValue`.
+    pub fn with_import_meta(
+        mut self,
+        lookup: impl Fn(&str, &[&str]) -> Option<yield_vm::ConstValue> + 'a,
+    ) -> Self {
+        self.import_meta = Some(Box::new(lookup));
         self
     }
 }
@@ -202,7 +218,7 @@ impl Compiler {
                 }
             })?;
         }
-        let mut build = lower::lower_graph(&graph, self)?;
+        let mut build = lower::lower_graph(&graph, self, project.import_meta.as_deref())?;
         if graph
             .modules
             .iter()

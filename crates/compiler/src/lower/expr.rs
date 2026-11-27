@@ -9,7 +9,7 @@ use oxc::syntax::operator::{
 use yield_vm::bytecode::{
     AccessorPrefix, BinaryOp, CallArgs, Constant, Instr, PropertyDefinition, UnaryOp,
 };
-use yield_vm::{BindingId, JsString};
+use yield_vm::{BindingId, ConstValue, JsString};
 
 use super::{FunctionSource, HOME_BINDING, Lowerer, NEW_TARGET_BINDING, THIS_BINDING};
 use crate::emit::Reg;
@@ -449,6 +449,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         while let Expression::ParenthesizedExpression(paren) = tag {
             tag = &paren.expression;
         }
+        self.reject_import_meta_use(tag)?;
         let (callee, receiver) = match tag {
             Expression::Identifier(identifier) => {
                 (self.compile_named_callee(identifier, false)?, None)
@@ -1057,6 +1058,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             ));
         }
         if let Some(member) = argument.as_member_expression() {
+            self.reject_import_meta_member(member)?;
             self.check_delete_member(member)?;
             let reference = self.compile_member_ref(member, None)?;
             return self.emit_delete_property(reference);
@@ -1064,6 +1066,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         if let Expression::ChainExpression(chain) = argument
             && let Some(member) = chain.expression.as_member_expression()
         {
+            self.reject_import_meta_member(member)?;
             self.check_delete_member(member)?;
             let mut exits = Vec::new();
             let reference = self.compile_member_ref(member, Some(&mut exits))?;
@@ -1121,6 +1124,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         let (value, receiver) = if let ChainElement::CallExpression(call) = &chain.expression {
             (self.compile_call_inner(call, Some(&mut exits))?, None)
         } else if let Some(member) = chain.expression.as_member_expression() {
+            self.reject_import_meta_member(member)?;
             let (value, object) = self.compile_member_read(member, Some(&mut exits))?;
             (value, preserve_receiver.then_some(object))
         } else {
@@ -1324,6 +1328,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         while let Expression::ParenthesizedExpression(paren) = callee {
             callee = &paren.expression;
         }
+        self.reject_import_meta_use(callee)?;
         if let Expression::Super(super_expr) = callee {
             if expression.optional {
                 return Err(CompileError::new(
@@ -1473,6 +1478,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     }
 
     fn compile_new(&mut self, expression: &'ast NewExpression<'ast>) -> Result<Reg, CompileError> {
+        self.reject_import_meta_use(&expression.callee)?;
         let callee = self.compile_expression(&expression.callee)?;
         let args = self.compile_arguments(&expression.arguments)?;
         let dst = self.alloc_reg()?;
@@ -1580,6 +1586,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         }
 
         if let Some(member) = expression.left.as_member_expression() {
+            self.reject_import_meta_member(member)?;
             let mut reference = self.compile_member_ref(member, None)?;
             if expression.operator != AssignmentOperator::Assign {
                 reference = self.prepare_read_write_ref(reference, member.is_computed())?;
@@ -1725,6 +1732,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 ));
             }
         } else if let Some(member) = expression.argument.as_member_expression() {
+            self.reject_import_meta_member(member)?;
             let reference = self.compile_member_ref(member, None)?;
             Target::Member(self.prepare_read_write_ref(reference, member.is_computed())?)
         } else {
@@ -1785,6 +1793,16 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         member: &'ast MemberExpression<'ast>,
         exits: Option<&mut Vec<usize>>,
     ) -> Result<(Reg, Reg), CompileError> {
+        match classify_import_meta_member(member) {
+            Some(ImportMetaPath::Fold { span, segments }) => {
+                let dst = self.emit_import_meta(span, &segments)?;
+                return Ok((dst, dst));
+            }
+            Some(ImportMetaPath::Unsupported(span)) => {
+                return Err(unsupported(self.source_text(), span, "import.meta"));
+            }
+            None => {}
+        }
         let key = match member {
             MemberExpression::StaticMemberExpression(member)
                 if !matches!(member.object, Expression::Super(_)) =>
@@ -1824,11 +1842,70 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         Ok((self.emit_get_property(reference)?, reference.receiver()))
     }
 
+    fn reject_import_meta_use(&self, expression: &Expression<'_>) -> Result<(), CompileError> {
+        let expression = expression.without_parentheses();
+        if matches!(expression, Expression::ImportMeta(_)) {
+            return Err(unsupported(
+                self.source_text(),
+                expression.span(),
+                "import.meta",
+            ));
+        }
+        if let Some(member) = expression.as_member_expression() {
+            return self.reject_import_meta_member(member);
+        }
+        if let Expression::ChainExpression(chain) = expression {
+            if let Some(member) = chain.expression.as_member_expression() {
+                return self.reject_import_meta_member(member);
+            }
+            if let ChainElement::CallExpression(call) = &chain.expression {
+                return self.reject_import_meta_use(&call.callee);
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn reject_import_meta_member(
+        &self,
+        member: &MemberExpression<'_>,
+    ) -> Result<(), CompileError> {
+        if classify_import_meta_member(member).is_some() {
+            return Err(unsupported(
+                self.source_text(),
+                member.span(),
+                "import.meta",
+            ));
+        }
+        Ok(())
+    }
+
+    fn emit_import_meta(&mut self, span: Span, segments: &[&str]) -> Result<Reg, CompileError> {
+        let unknown = || {
+            CompileError::new(
+                self.source_text(),
+                span,
+                format!("unknown import.meta path: {segments:?}"),
+            )
+        };
+        let Some(lookup) = self.module.import_meta else {
+            return Err(unknown());
+        };
+        match lookup(self.module.id, segments) {
+            None => Err(unknown()),
+            Some(ConstValue::Undefined) => self.emit_undefined(),
+            Some(ConstValue::Null) => self.emit_constant(Constant::Null),
+            Some(ConstValue::Bool(value)) => self.emit_constant(Constant::Bool(value)),
+            Some(ConstValue::Number(value)) => self.emit_constant(Constant::Number(value)),
+            Some(ConstValue::String(value)) => self.emit_constant(Constant::String(value)),
+        }
+    }
+
     pub(super) fn compile_member_ref(
         &mut self,
         member: &'ast MemberExpression<'ast>,
         exits: Option<&mut Vec<usize>>,
     ) -> Result<PropertyRef, CompileError> {
+        self.reject_import_meta_member(member)?;
         match member {
             MemberExpression::StaticMemberExpression(member) => {
                 self.compile_static_member(member, exits)
@@ -2219,4 +2296,81 @@ fn comparison_operator(operator: BinaryOperator) -> Option<BinaryOp> {
         BinaryOperator::StrictInequality => BinaryOp::StrictNe,
         _ => return None,
     })
+}
+
+enum ImportMetaPath<'a> {
+    Fold {
+        span: oxc::span::Span,
+        segments: Vec<&'a str>,
+    },
+    Unsupported(oxc::span::Span),
+}
+
+fn import_meta_root(mut expression: &Expression<'_>) -> bool {
+    loop {
+        expression = expression.without_parentheses();
+        if matches!(expression, Expression::ImportMeta(_)) {
+            return true;
+        }
+        if let Some(member) = expression.as_member_expression() {
+            expression = member.object();
+            continue;
+        }
+        if let Expression::ChainExpression(chain) = expression {
+            if let Some(member) = chain.expression.as_member_expression() {
+                expression = member.object();
+                continue;
+            }
+            if let ChainElement::CallExpression(call) = &chain.expression {
+                expression = &call.callee;
+                continue;
+            }
+        }
+        return false;
+    }
+}
+
+fn static_import_meta_segment<'a>(member: &'a MemberExpression<'a>) -> Option<&'a str> {
+    if member.optional() {
+        return None;
+    }
+    match member {
+        MemberExpression::StaticMemberExpression(member) => Some(member.property.name.as_str()),
+        MemberExpression::ComputedMemberExpression(member) => {
+            match member.expression.without_parentheses() {
+                Expression::StringLiteral(literal) => literal.value.as_str(),
+                _ => None,
+            }
+        }
+        MemberExpression::PrivateFieldExpression(_) => None,
+    }
+}
+
+fn classify_import_meta_member<'a>(member: &'a MemberExpression<'a>) -> Option<ImportMetaPath<'a>> {
+    if !import_meta_root(member.object())
+        && !matches!(
+            member.object().without_parentheses(),
+            Expression::ImportMeta(_)
+        )
+    {
+        return None;
+    }
+    let span = member.span();
+    let mut segments = Vec::new();
+    let mut current = member;
+    loop {
+        let Some(segment) = static_import_meta_segment(current) else {
+            return Some(ImportMetaPath::Unsupported(span));
+        };
+        segments.push(segment);
+        let object = current.object().without_parentheses();
+        if matches!(object, Expression::ImportMeta(_)) {
+            segments.reverse();
+            return Some(ImportMetaPath::Fold { span, segments });
+        }
+        let Some(inner) = object.as_member_expression() else {
+            return Some(ImportMetaPath::Unsupported(span));
+        };
+        current = inner;
+    }
 }

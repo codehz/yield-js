@@ -83,7 +83,7 @@ Node 扩展名加载器只接收 UTF-8 文本，不支持直接加载二进制�
 
 - 完整 ECMAScript TDZ
 - 不支持运行时加载或编译代码。动态 `import()` 只接受字符串字面量，按依赖图提前求值，不保留惰性加载或原生动态导入时序。内建 `eval` 无论输入为何均抛 `EvalError`，调用或构造内建 `Function` 均抛 `TypeError`。
-- `import.meta` 和导入/导出属性仍在编译期拒绝。跨模块读取有运行时 TDZ 检查，不改变普通函数的 TDZ 规则。
+- 导入/导出属性仍在编译期拒绝。`import.meta` 仅折叠宿主在打包期注入的完整静态路径常量，不提供对象、`resolve` 或运行时 URL 推导。跨模块读取有运行时 TDZ 检查，不改变普通函数的 TDZ 规则。
 - `debugger`：不在首版语法表
 - `WeakRef`、`FinalizationRegistry`、共享内存、`Atomics`
 - 旧式 `Object.prototype.__proto__` 访问器；保留 `Object` / `Reflect` 的显式原型操作。

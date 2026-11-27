@@ -3556,3 +3556,270 @@ fn stack_sites_follow_ecmascript_lines_and_parameter_initializers() {
         .unwrap();
     assert_eq!((site.line, site.column), (6, 33));
 }
+
+#[test]
+fn folds_import_meta_paths_per_defining_module() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use yield_vm::ConstValue;
+    use yield_vm::bytecode::Constant;
+
+    let queries = Rc::new(RefCell::new(Vec::<(String, Vec<String>)>::new()));
+    let quoted = "a\"\nb";
+    let lookup = {
+        let queries = queries.clone();
+        move |module: &str, path: &[&str]| {
+            queries.borrow_mut().push((
+                module.to_owned(),
+                path.iter().map(|s| (*s).to_owned()).collect(),
+            ));
+            match (module, path) {
+                ("main.js", ["url"]) => Some(ConstValue::String("file://main".into())),
+                ("dep.js", ["url"]) => Some(ConstValue::String("file://dep".into())),
+                ("main.js", ["env", "DEV"]) => Some(ConstValue::Bool(true)),
+                ("main.js", ["quoted"]) => Some(ConstValue::String(quoted.into())),
+                ("main.js", ["env.MODE"]) => Some(ConstValue::String("dotted".into())),
+                ("main.js", ["env", "MODE"]) => Some(ConstValue::String("nested".into())),
+                ("main.js", ["SENTINEL"]) => Some(ConstValue::String("should-not-appear".into())),
+                _ => None,
+            }
+        }
+    };
+    let resolver = MemoryResolver::new([
+        (
+            "main.js",
+            r#"
+import { fromDep } from './dep.js';
+export function fromMain() { return import.meta.url; }
+export { fromDep };
+export function pick() { return import.meta.env['DEV'] ? 1 : 2; }
+export function quoted() { return import.meta.quoted; }
+export function dotted() { return import.meta['env.MODE']; }
+export function nested() { return import.meta.env.MODE; }
+"#,
+        ),
+        (
+            "dep.js",
+            "export function fromDep() { return import.meta.url; }",
+        ),
+    ])
+    .unwrap();
+    let build = Compiler::default()
+        .compile(Project::new("main.js", resolver).with_import_meta(lookup))
+        .expect("import.meta folds");
+    let recorded = queries.borrow().clone();
+    assert!(
+        recorded
+            .iter()
+            .all(|(_, path)| path.as_slice() != ["SENTINEL"] && path.as_slice() != ["env"]),
+        "{recorded:?}"
+    );
+    assert!(
+        recorded
+            .iter()
+            .any(|(m, p)| m == "main.js" && *p == ["url"])
+    );
+    assert!(recorded.iter().any(|(m, p)| m == "dep.js" && *p == ["url"]));
+    assert!(
+        recorded
+            .iter()
+            .any(|(m, p)| m == "main.js" && *p == ["env", "DEV"])
+    );
+    assert!(
+        recorded
+            .iter()
+            .any(|(m, p)| m == "main.js" && *p == ["env.MODE"])
+    );
+    assert!(
+        recorded
+            .iter()
+            .any(|(m, p)| m == "main.js" && *p == ["env", "MODE"])
+    );
+
+    fn returned_string<'a>(build: &'a Build, name: &str) -> &'a Constant {
+        let function = build
+            .functions
+            .iter()
+            .find(|f| f.initial_name == name || f.name == name)
+            .unwrap();
+        let Instr::Const { constant, .. } = function
+            .code
+            .iter()
+            .find(|op| matches!(op, Instr::Const { .. }))
+            .unwrap()
+        else {
+            panic!("missing const in {name}");
+        };
+        &build.constants[*constant as usize]
+    }
+    assert_eq!(
+        returned_string(&build, "fromMain"),
+        &Constant::String("file://main".into())
+    );
+    assert_eq!(
+        returned_string(&build, "fromDep"),
+        &Constant::String("file://dep".into())
+    );
+    assert_eq!(
+        returned_string(&build, "quoted"),
+        &Constant::String(quoted.into())
+    );
+    assert_eq!(
+        returned_string(&build, "dotted"),
+        &Constant::String("dotted".into())
+    );
+    assert_eq!(
+        returned_string(&build, "nested"),
+        &Constant::String("nested".into())
+    );
+    let pick = build
+        .functions
+        .iter()
+        .find(|f| f.initial_name == "pick" || f.name == "pick")
+        .unwrap();
+    assert!(!pick.code.iter().any(|op| matches!(
+        op,
+        Instr::BranchFalse { .. } | Instr::BranchTrue { .. } | Instr::Jump { .. }
+    )));
+    assert!(
+        pick.code
+            .iter()
+            .any(|op| matches!(op, Instr::Const { constant, .. }
+        if matches!(build.constants[*constant as usize], Constant::Number(n) if n == 1.0)))
+    );
+    assert!(!build.constants.iter().any(|c| matches!(
+        c,
+        Constant::String(value) if value == "should-not-appear"
+    )));
+
+    let url_only = [
+        (
+            "main.js",
+            "export function fromMain() { return import.meta.url; }",
+        ),
+        (
+            "dep.js",
+            "export function fromDep() { return import.meta.url; }",
+        ),
+    ];
+    let baseline = Compiler::default()
+        .compile(
+            Project::new("main.js", MemoryResolver::new(url_only).unwrap()).with_import_meta(
+                |module, path| match (module, path) {
+                    ("main.js", ["url"]) => Some(ConstValue::String("file://main".into())),
+                    ("dep.js", ["url"]) => Some(ConstValue::String("file://dep".into())),
+                    _ => None,
+                },
+            ),
+        )
+        .unwrap();
+    let unchanged_sentinel = Compiler::default()
+        .compile(
+            Project::new("main.js", MemoryResolver::new(url_only).unwrap()).with_import_meta(
+                |module, path| match (module, path) {
+                    ("main.js", ["url"]) => Some(ConstValue::String("file://main".into())),
+                    ("dep.js", ["url"]) => Some(ConstValue::String("file://dep".into())),
+                    (_, ["SENTINEL"]) => Some(ConstValue::String("other".into())),
+                    _ => None,
+                },
+            ),
+        )
+        .unwrap();
+    let changed_url = Compiler::default()
+        .compile(
+            Project::new("main.js", MemoryResolver::new(url_only).unwrap()).with_import_meta(
+                |module, path| match (module, path) {
+                    ("main.js", ["url"]) => Some(ConstValue::String("file://main2".into())),
+                    ("dep.js", ["url"]) => Some(ConstValue::String("file://dep".into())),
+                    _ => None,
+                },
+            ),
+        )
+        .unwrap();
+    assert_eq!(baseline.build_id, unchanged_sentinel.build_id);
+    assert_ne!(baseline.build_id, changed_url.build_id);
+}
+
+#[test]
+fn import_meta_undefined_is_not_unknown() {
+    use yield_vm::ConstValue;
+    let resolver = MemoryResolver::new([(
+        "main.js",
+        "export function run() { return import.meta.gone; }",
+    )])
+    .unwrap();
+    let build = Compiler::default()
+        .compile(
+            Project::new("main.js", resolver)
+                .with_import_meta(|_, path| (path == ["gone"]).then_some(ConstValue::Undefined)),
+        )
+        .unwrap();
+    let run = build
+        .functions
+        .iter()
+        .find(|f| f.initial_name == "run" || f.name == "run")
+        .unwrap();
+    assert!(
+        run.code
+            .iter()
+            .any(|op| matches!(op, Instr::Undefined { .. }))
+    );
+}
+
+#[test]
+fn unknown_import_meta_path_uses_defining_module_span() {
+    let resolver = MemoryResolver::new([
+        (
+            "main.js",
+            "import { f } from './dep.js'; export function run() { return f(); }",
+        ),
+        (
+            "dep.js",
+            "\nexport function f() {\n  return import.meta.env.MISSING;\n}\n",
+        ),
+    ])
+    .unwrap();
+    let error = Compiler::default()
+        .compile(Project::new("main.js", resolver).with_import_meta(|_, _| None))
+        .unwrap_err();
+    assert_eq!(error.module(), "dep.js");
+    assert_eq!((error.line(), error.column()), (3, 10), "{error}");
+    assert!(
+        error.message().starts_with("unknown import.meta path: "),
+        "{error}"
+    );
+    assert!(error.message().contains(r#"["env", "MISSING"]"#), "{error}");
+}
+
+#[test]
+fn illegal_import_meta_forms_do_not_query_host() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    for source in [
+        "import.meta.env[k]",
+        "import.meta.env?.MODE",
+        "import.meta.resolve('x')",
+        "import.meta.env.MODE++",
+        "delete import.meta.url",
+        "({x: import.meta.url} = v)",
+    ] {
+        let queried = Rc::new(Cell::new(false));
+        let flag = queried.clone();
+        let body = format!("export function run(k, v) {{\n  {source};\n}}");
+        let resolver = MemoryResolver::new([("main.js", body.as_str())]).unwrap();
+        let error = Compiler::default()
+            .compile(
+                Project::new("main.js", resolver).with_import_meta(move |_, _| {
+                    flag.set(true);
+                    None
+                }),
+            )
+            .unwrap_err();
+        assert!(
+            error.message().starts_with("unsupported syntax:"),
+            "{source}: {error}"
+        );
+        assert!(error.message().contains("import.meta"), "{source}: {error}");
+        assert!(!queried.get(), "host queried for {source}");
+    }
+}
