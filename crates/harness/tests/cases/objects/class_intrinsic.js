@@ -87,12 +87,16 @@ export async function run() {
   expect(Object.getPrototypeOf(existing)).toBe(Object.prototype);
   expect(new Object(existing)).toBe(existing);
 
-  // Proxy keeps the target's prototype and its existing target-kind restrictions.
+  // ProxyCreate ignores newTarget; the proxy still forwards [[GetPrototypeOf]] to the target.
   const proxy = Reflect.construct(Proxy, [list, {}], Table);
   expect(Object.getPrototypeOf(proxy)).toBe(List.prototype);
   expect(proxy instanceof Table).toBe(false);
   proxy[2] = 'through proxy';
   expect(list[2]).toBe('through proxy');
   expect(list.length).toBe(3);
-  expectTypeError(() => Reflect.construct(Proxy, [table, {}], List));
+  const mapProxy = Reflect.construct(Proxy, [table, {}], List);
+  expect(Object.getPrototypeOf(mapProxy)).toBe(Table.prototype);
+  expect(mapProxy instanceof List).toBe(false);
+  expect(mapProxy instanceof Table).toBe(true);
+  expect(table.get('key')).toBe(1);
 }

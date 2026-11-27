@@ -704,13 +704,6 @@ fn restore_rejects_malformed_proxy_records() {
         .position(|record| matches!(&record.object, Object::Proxy { .. }))
         .expect("live proxy record");
     let proxy_id = snapshot.objects[index].id;
-    let constructor = snapshot.roots["proxy"];
-    let environment = snapshot
-        .objects
-        .iter()
-        .find(|record| matches!(&record.object, Object::Environment(_)))
-        .expect("live environment")
-        .id;
     for (target_override, handler_override, message) in [
         (Some(u32::MAX), None, "missing object"),
         (None, Some(u32::MAX), "missing object"),
