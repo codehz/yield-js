@@ -2,7 +2,7 @@
 
 > **状态：首版契约已落地，仍非最终设计。** 本文展开 [`host-interface.md`](host-interface.md) 的静态模块与 JS 值槽模型，以及 [`snapshot.md`](snapshot.md) 的 operation 中断与恢复规则；命名与记录编码仍可能调整。
 >
-> `crates/vm/src/binding/schema.rs` 提供 `ModuleDecl`、`HostClass`、`HostModule` / `FromServices` / `ModuleExports`、`Operation` 及内部静态绑定表；`binding/codec.rs` 提供 `Encode` / `Decode`；`binding/call.rs` 提供 `JsValue`、`CallCx` 与 `ModuleCx`。VM 接管 `Host`，持有原型、实例槽、payload、模块状态和 operation 记录。第 15 节还记录尚未实现的能力。
+> `crates/vm/src/binding/schema.rs` 提供 `ModuleDecl`、`HostClass`、`HostModule` / `FromServices` / `ModuleExports`、`Operation` 及内部静态绑定表；`binding/codec.rs` 提供 `Encode` / `Decode`；`binding/call/` 提供 `JsValue`、`CallCx` 与 `ModuleCx`。VM 接管 `Host`，持有原型、实例槽、payload、模块状态和 operation 记录。第 15 节还记录尚未实现的能力。
 
 ## 1. 目标与范围
 
