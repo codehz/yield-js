@@ -2,6 +2,7 @@
 // the Rust bindings register; scripts may import any subset.
 
 declare module "test" {
+    export function syncCall(cb: unknown, receiver: unknown, arg: unknown): unknown;
     /** Starts a timer that calls `cb` after `ms` milliseconds; returns a task handle. */
     export function spawnDelayedTask(cb: unknown, ms: unknown): unknown;
     /** Cancels a timer handle returned by `spawnDelayedTask`. */

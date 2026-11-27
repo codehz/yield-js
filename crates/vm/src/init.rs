@@ -185,6 +185,7 @@ impl VmCore {
             epoch: next_epoch(),
             next_operation_id: 1,
             next_host_call: 1,
+            sync_call_depth: 0,
             next_continuation_id: 1,
             active_array_joins: BTreeSet::new(),
             active_event_paths: Vec::new(),

@@ -633,6 +633,8 @@ pub(crate) struct VmCore {
     pub(crate) epoch: u32,
     pub(crate) next_operation_id: u64,
     pub(crate) next_host_call: u64,
+    /// Native callback nesting, reset on restore and never serialized.
+    pub(crate) sync_call_depth: u8,
     pub(crate) next_continuation_id: ContinuationId,
     /// Synchronous join recursion guard; never live at a snapshot boundary.
     pub(crate) active_array_joins: BTreeSet<ObjectId>,
@@ -796,6 +798,13 @@ impl VmCore {
                                 args: ClassArgs<'_>| {
             base.initialize(vm, host, roots, prototype, name, args)
         };
+        let invoke_guest = |vm: &mut VmCore,
+                            roots: &ActiveRoots<'_>,
+                            callee: &Value,
+                            receiver: &Value,
+                            args: &[Value]| {
+            vm.invoke(host, roots, callee, Arguments::Values(args), receiver)
+        };
         loop {
             if task.is_some_and(|id| !self.host_tasks.contains_key(&id)) {
                 return Ok(None);
@@ -821,6 +830,7 @@ impl VmCore {
                 construct: construction.is_some() && matches!(entry, HostEntry::Call(_)),
                 allocation_prototype,
                 initialize_class: Some(&initialize_class),
+                invoke_guest: Some(&invoke_guest),
                 handles: Default::default(),
             };
             let (cx, step) = match entry {
@@ -2024,6 +2034,7 @@ impl VmCore {
             epoch: next_epoch(),
             next_operation_id,
             next_host_call: 1,
+            sync_call_depth: 0,
             next_continuation_id,
             active_array_joins: BTreeSet::new(),
             active_event_paths: Vec::new(),

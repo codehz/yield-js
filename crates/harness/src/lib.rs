@@ -852,9 +852,36 @@ struct HostDOMException;
 #[host_class(tag = "test:HostTypeError", parent = TypeError)]
 struct HostTypeError;
 
+#[host_class(tag = "test:SyncCallResult", methods)]
+struct SyncCallResult {
+    #[js_slot]
+    result: JsValue,
+}
+
+#[methods(SyncCallResult)]
+impl SyncCallResult {
+    #[get(name = "result")]
+    fn get_result(cx: &mut CallCx<'_>, this: This<Self>) -> JsResult<JsValue> {
+        this.result(cx)
+    }
+}
+
+fn sync_call_result(
+    cx: &mut CallCx<'_>,
+    cb: JsValue,
+    receiver: JsValue,
+    arg: JsValue,
+) -> JsResult<JsValue> {
+    let wrapper = cx.alloc(SyncCallResult {})?.value(cx);
+    let result = cx.call_sync(cb, receiver, vec![arg])?;
+    cx.instance::<SyncCallResult>(&wrapper)?
+        .set_result(cx, result)?;
+    Ok(wrapper)
+}
+
 #[host_module(
     name = "test",
-    classes = [Node, Matcher, ParseError, ErrorBase, ErrorDerived, HostDOMException, HostTypeError],
+    classes = [Node, Matcher, ParseError, ErrorBase, ErrorDerived, HostDOMException, HostTypeError, SyncCallResult],
     operations = [Wait, Pause, Reject, Reissue, Timer],
     services = [counters: Rc<Counters>],
 )]
@@ -952,6 +979,17 @@ impl TestModule {
         let error = cx.alloc_with_super(ParseError, &[JsValue::string("lazy parse failure")])?;
         Err(cx.throw(error.value(cx)))
     }
+
+    #[function(name = "syncCall")]
+    fn sync_call(
+        cx: &mut yield_vm::ModuleCx<'_, Self>,
+        cb: JsValue,
+        receiver: JsValue,
+        arg: JsValue,
+    ) -> JsResult<JsValue> {
+        sync_call_result(cx, cb, receiver, arg)
+    }
+
     #[function(name = "spawnDelayedTask")]
     fn spawn_delayed_task(
         cx: &mut yield_vm::ModuleCx<'_, Self>,

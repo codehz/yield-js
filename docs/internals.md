@@ -78,7 +78,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 - `Snapshot::to_bytes` / `from_bytes` 使用 `YIELDSNP`、小端 `SNAPSHOT_BINARY_VERSION` 和小端快照记录版本，后接 bincode 小端变长整数记录。解码拒绝不匹配的版本和尾随数据，但不证明来源、完整性或堆图有效性。二进制容器或编码选项变更只提升 `SNAPSHOT_BINARY_VERSION`；JSON 快照格式保持独立。
 - `ArrayBuffer` 的二进制编码批量写入后备字节；在当前 bincode 配置下，`serialize_bytes` 与 `Vec<u8>` 序列具有相同的长度前缀和原始字节，解码仍读 `Option<Vec<u8>>`。JSON 仍是字节数组（已分离时为 `null`）。
 
-宿主绑定函数是同步的，不得通过执行入口重入 VM。`CallCx::construct` 和 `CallCx::alloc_with_super` 可以执行标准基类的脚本转换，转换时调用内有效句柄仍保持可达。声明不可变且共享；VM 拥有原型、实例、槽、payload 与模块状态及 operation 记录。`JsValue` 句柄只在产生它的 VM 代际与调用内有效；保留值必须依赖声明的槽或模块状态槽。
+宿主绑定可以通过 `CallCx::call_sync` 同步调用脚本，不能重入调度器或排空微任务。`CallCx::construct` 和 `CallCx::alloc_with_super` 可以执行标准基类的脚本转换。上述调用期间，外层有效句柄通过活动根链保持可达。`call_sync` 的原生递归计数不进入快照；事件父级回调不提供此能力。声明不可变且共享；VM 拥有原型、实例、槽、payload 与模块状态及 operation 记录。`JsValue` 句柄只在产生它的 VM 代际与调用内有效；保留值必须依赖声明的槽或模块状态槽。
 
 ## 3. 改动位置
 

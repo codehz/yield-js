@@ -5,6 +5,7 @@ use crate::gc::{ActiveRoots, TraceRoots, Tracer};
 use crate::heap::{Attributes, EventState, EventTargetState, Object, PlainObject, Property};
 use crate::intrinsic::{ClassArgs, ClassDef};
 use crate::intrinsics::{IntrinsicClass, TypeError};
+use crate::runtime::Invocation;
 use crate::value::{JsBigInt, JsString, ObjectId, PropertyKey, SymbolId, Value, ValueRef};
 use crate::vm::VmCore;
 
@@ -516,6 +517,15 @@ pub(crate) type InitializeClass<'a> = dyn Fn(
     ) -> Result<crate::runtime::Invocation, crate::VmError>
     + 'a;
 
+pub(crate) type InvokeGuest<'a> = dyn Fn(
+        &mut VmCore,
+        &ActiveRoots<'_>,
+        &Value,
+        &Value,
+        &[Value],
+    ) -> Result<Invocation, crate::VmError>
+    + 'a;
+
 pub struct CallCx<'a> {
     pub(crate) vm: &'a mut VmCore,
     pub(crate) roots: &'a ActiveRoots<'a>,
@@ -528,7 +538,8 @@ pub struct CallCx<'a> {
     pub(crate) construct: bool,
     pub(crate) allocation_prototype: Option<(ClassId, ObjectId)>,
     pub(crate) initialize_class: Option<&'a InitializeClass<'a>>,
-    // Argument coercion can execute guest code and collect while the callback is active.
+    pub(crate) invoke_guest: Option<&'a InvokeGuest<'a>>,
+    // Nested guest execution can collect while the callback is active.
     pub(crate) handles: RefCell<HandleRoots>,
 }
 
@@ -559,6 +570,7 @@ impl VmCore {
             construct: false,
             allocation_prototype: None,
             initialize_class: None,
+            invoke_guest: None,
             handles: Default::default(),
         };
         let (value, wrap): (JsValue, fn(Value) -> Invocation) = match call(&mut cx, receiver) {
@@ -678,6 +690,37 @@ impl<'a> CallCx<'a> {
         self.js_value(Value::object(id))
     }
 
+    /// Call guest code on the current Rust stack without draining microtasks.
+    /// A returned Promise is an ordinary value; a thrown value retains its identity.
+    pub fn call_sync(
+        &mut self,
+        callee: JsValue,
+        receiver: JsValue,
+        args: Vec<JsValue>,
+    ) -> JsResult<JsValue> {
+        let invoke = self
+            .invoke_guest
+            .ok_or_else(|| JsError::fault("event parent callbacks cannot call guest code"))?;
+        let (callee, receiver, args) = self.unpack_call(callee, receiver, args)?;
+        const MAX_SYNC_CALL_DEPTH: u8 = 16;
+        if self.vm.sync_call_depth >= MAX_SYNC_CALL_DEPTH {
+            let error = self
+                .vm
+                .make_range_error(self.roots, "host callback nesting limit exceeded")
+                .map_err(|error| JsError::fault(error.to_string()))?;
+            return Err(self.throw(self.js_value(error)));
+        }
+        let handles = (&self.handles, self.args);
+        let roots = self.roots.with(&handles);
+        self.vm.sync_call_depth += 1;
+        let result = invoke(self.vm, &roots, &callee, &receiver, &args);
+        self.vm.sync_call_depth -= 1;
+        match result.map_err(|error| JsError::fault(error.to_string()))? {
+            Invocation::Value(value) => Ok(self.js_value(value)),
+            Invocation::Thrown(value) => Err(self.throw(self.js_value(value))),
+        }
+    }
+
     /// Request a script call after this context ends. The resume context has
     /// the original `this` and receives `saved` as its positional arguments.
     pub fn request_call(
@@ -770,14 +813,27 @@ impl<'a> CallCx<'a> {
         receiver: JsValue,
         args: Vec<JsValue>,
     ) -> JsResult<Action> {
+        let (callee, receiver, args) = self.unpack_call(callee, receiver, args)?;
         Ok(Action::Call {
-            callee: self.unpack(callee)?,
-            receiver: self.unpack(receiver)?,
-            args: args
-                .into_iter()
+            callee,
+            receiver,
+            args,
+        })
+    }
+
+    fn unpack_call(
+        &self,
+        callee: JsValue,
+        receiver: JsValue,
+        args: Vec<JsValue>,
+    ) -> JsResult<(Value, Value, Vec<Value>)> {
+        Ok((
+            self.unpack(callee)?,
+            self.unpack(receiver)?,
+            args.into_iter()
                 .map(|value| self.unpack(value))
                 .collect::<JsResult<_>>()?,
-        })
+        ))
     }
 
     fn suspend(&self, action: Action, saved: Vec<JsValue>, resume: Resume) -> JsResult<HostStep> {
