@@ -1482,7 +1482,7 @@ impl VmCore {
         };
         // Prototype links are kept acyclic by set_prototype and snapshot restore.
         loop {
-            let parent = match self.proxy_prototype(roots, current)? {
+            let parent = match self.proxy_prototype(host, roots, current)? {
                 Ok(Some(parent)) => parent,
                 Ok(None) => break,
                 Err(error) => return Ok(Invocation::Thrown(error)),

@@ -75,18 +75,15 @@ impl VmCore {
         }
     }
 
-    pub(crate) fn prevent_extensions_builtin_impl(
+    pub(crate) fn prevent_extensions_builtin_impl<P: PlatformServices>(
         &mut self,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         reflect: bool,
     ) -> Result<Invocation, VmError> {
         let target = args.first().unwrap_or(&UNDEFINED_VALUE);
         if let ValueRef::Object(id) = target.view() {
-            let id = match self.proxy_base(roots, id)? {
-                Ok(id) => id,
-                Err(error) => return Ok(Invocation::Thrown(error)),
-            };
             // A view over a resizable buffer can still gain and lose elements,
             // so it cannot be made non-extensible.
             if self
@@ -103,7 +100,14 @@ impl VmCore {
                     )
                 };
             }
-            self.heap.get_mut(id)?.prevent_extensions();
+            match self.proxy_prevent_extensions(host, roots, id)? {
+                Ok(true) => {}
+                Ok(false) if reflect => return Ok(Invocation::Value(Value::boolean(false))),
+                Ok(false) => {
+                    return self.throw_type_error(roots, "Object.preventExtensions was rejected");
+                }
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            }
         } else if reflect {
             return self.throw_type_error(roots, "Reflect.preventExtensions requires an object");
         }
@@ -114,20 +118,18 @@ impl VmCore {
         }))
     }
 
-    pub(crate) fn is_extensible_builtin_impl(
+    pub(crate) fn is_extensible_builtin_impl<P: PlatformServices>(
         &mut self,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         reflect: bool,
     ) -> Result<Invocation, VmError> {
         let extensible = match args.first().map(Value::view) {
-            Some(ValueRef::Object(id)) => {
-                let base = match self.proxy_base(roots, id)? {
-                    Ok(base) => base,
-                    Err(error) => return Ok(Invocation::Thrown(error)),
-                };
-                self.heap.get(base)?.is_extensible()
-            }
+            Some(ValueRef::Object(id)) => match self.proxy_is_extensible(host, roots, id)? {
+                Ok(value) => value,
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            },
             _ if reflect => {
                 return self.throw_type_error(roots, "Reflect.isExtensible requires an object");
             }
@@ -136,8 +138,9 @@ impl VmCore {
         Ok(Invocation::Value(Value::boolean(extensible)))
     }
 
-    pub(crate) fn get_prototype_of(
+    pub(crate) fn get_prototype_of<P: PlatformServices>(
         &mut self,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         reflect: bool,
@@ -159,14 +162,15 @@ impl VmCore {
                 },
             );
         };
-        Ok(match self.proxy_prototype(roots, target)? {
+        Ok(match self.proxy_prototype(host, roots, target)? {
             Ok(proto) => Invocation::Value(proto.map_or(Value::NULL, Value::object)),
             Err(error) => Invocation::Thrown(error),
         })
     }
 
-    pub(crate) fn set_prototype_of(
+    pub(crate) fn set_prototype_of<P: PlatformServices>(
         &mut self,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         reflect: bool,
@@ -193,11 +197,10 @@ impl VmCore {
         let ValueRef::Object(target_id) = target.view() else {
             return Ok(Invocation::Value(target.clone()));
         };
-        let base = match self.proxy_base(roots, target_id)? {
-            Ok(base) => base,
+        let accepted = match self.proxy_set_prototype(host, roots, target_id, prototype)? {
+            Ok(value) => value,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
-        let accepted = self.heap.set_prototype(base, prototype)?;
         if reflect {
             Ok(Invocation::Value(Value::boolean(accepted)))
         } else if accepted {
@@ -219,17 +222,23 @@ impl VmCore {
         let ValueRef::Object(id) = target.view() else {
             return Ok(Invocation::Value(target.clone()));
         };
-        let base = match self.proxy_base(roots, id)? {
-            Ok(base) => base,
-            Err(error) => return Ok(Invocation::Thrown(error)),
-        };
         // A typed array's elements are defined one by one, so a non-empty view
         // cannot be frozen; the per-key path reports that as a TypeError.
-        if base == id && self.heap.typed_array(id)?.is_none() {
+        if self.heap.proxy_target(id)?.is_some_and(|base| base == id)
+            && self.heap.typed_array(id)?.is_none()
+        {
             self.heap.get_mut(id)?.set_integrity_level(level);
             return Ok(Invocation::Value(target.clone()));
         }
-        self.heap.get_mut(base)?.prevent_extensions();
+        match self.proxy_prevent_extensions(host, roots, id)? {
+            Ok(true) => {}
+            Ok(false) => {
+                return Ok(Invocation::Thrown(
+                    self.type_error(roots, "cannot prevent extensions")?,
+                ));
+            }
+            Err(error) => return Ok(Invocation::Thrown(error)),
+        }
         let keys = match self.own_keys(host, roots, id, false)? {
             Ok(keys) => keys,
             Err(error) => return Ok(Invocation::Thrown(error)),
@@ -272,14 +281,13 @@ impl VmCore {
         let Some(ValueRef::Object(id)) = args.first().map(Value::view) else {
             return result(true);
         };
-        let base = match self.proxy_base(roots, id)? {
-            Ok(base) => base,
-            Err(error) => return Ok(Invocation::Thrown(error)),
-        };
-        if base == id {
-            return result(self.heap.get(base)?.test_integrity_level(level));
+        if self.heap.proxy_target(id)?.is_some_and(|base| base == id) {
+            return result(self.heap.get(id)?.test_integrity_level(level));
         }
-        if self.heap.get(base)?.is_extensible() {
+        if match self.proxy_is_extensible(host, roots, id)? {
+            Ok(value) => value,
+            Err(error) => return Ok(Invocation::Thrown(error)),
+        } {
             return result(false);
         }
         let keys = match self.own_keys(host, roots, id, false)? {

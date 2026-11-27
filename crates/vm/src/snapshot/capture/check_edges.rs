@@ -99,11 +99,40 @@ fn check_abort_state(
     Ok(signal.onabort)
 }
 
+fn is_script_object(object: &Object) -> bool {
+    !matches!(
+        object,
+        Object::Environment(_) | Object::ForInIterator { .. } | Object::DisposeState(_)
+    )
+}
+
+fn is_constructible_object(build: &Build, heap: &Heap, target: ObjectId) -> bool {
+    let mut current = target;
+    let mut seen = BTreeSet::new();
+    loop {
+        if !seen.insert(current) {
+            return false;
+        }
+        match heap.get(current) {
+            Ok(Object::Bound(bound)) => current = bound.target,
+            Ok(Object::Proxy { constructible, .. }) => return *constructible,
+            Ok(Object::Function(function)) => {
+                return build.function(function.func_id).is_some_and(|code| {
+                    !build.is_initializer(function.func_id) && code.is_constructable()
+                });
+            }
+            Ok(Object::Native(native)) => return native.constructable(),
+            _ => return false,
+        }
+    }
+}
+
 pub(super) fn check_heap_edges(
     build: &Build,
     heap: &Heap,
     global: ObjectId,
 ) -> Result<(), VmError> {
+    let mut proxy_targets: BTreeMap<ObjectId, ObjectId> = BTreeMap::new();
     let mut edges = Vec::new();
     let mut prototypes = BTreeMap::new();
     let mut revocable = BTreeSet::new();
@@ -721,45 +750,40 @@ pub(super) fn check_heap_edges(
             }
         }
         if let Object::Proxy {
-            slots: Some((target, handler)),
+            slots,
+            callable,
+            constructible,
             ..
         } = heap.get(id)?
         {
-            if !matches!(
-                heap.get(*target),
-                Ok(Object::Plain(_)
-                    | Object::Array(_)
-                    | Object::Boxed { .. }
-                    | Object::Date { .. }
-                    | Object::DomException { .. }
-                    | Object::Event { .. }
-                    | Object::EventTarget { .. }
-                    | Object::Performance { .. }
-                    | Object::AbortController { .. }
-                    | Object::AbortSignal { .. }
-                    | Object::ArrayBuffer(_)
-                    | Object::TypedArray(_)
-                    | Object::DataView(_)
-                    | Object::Proxy { .. })
-            ) {
+            if *constructible && !*callable {
                 return Err(VmError::InvalidSnapshot(format!(
-                    "proxy {id} has invalid target {target}"
+                    "proxy {id} is constructible but not callable"
                 )));
             }
-            if matches!(
-                heap.get(*handler),
-                Err(_)
-                    | Ok(Object::Environment(_)
-                        | Object::ForInIterator { .. }
-                        | Object::DisposeState(_))
-            ) {
-                return Err(VmError::InvalidSnapshot(format!(
-                    "proxy {id} has invalid handler {handler}"
-                )));
+            if let Some((target, handler)) = slots {
+                let target_object = match heap.get(*target) {
+                    Ok(object) if is_script_object(object) => object,
+                    _ => {
+                        return Err(VmError::InvalidSnapshot(format!(
+                            "proxy {id} has invalid target {target}"
+                        )));
+                    }
+                };
+                if *callable != is_callable_object(target_object)
+                    || *constructible != is_constructible_object(build, heap, *target)
+                {
+                    return Err(VmError::InvalidSnapshot(format!(
+                        "proxy {id} capabilities do not match target {target}"
+                    )));
+                }
+                if !matches!(heap.get(*handler), Ok(object) if is_script_object(object)) {
+                    return Err(VmError::InvalidSnapshot(format!(
+                        "proxy {id} has invalid handler {handler}"
+                    )));
+                }
+                proxy_targets.insert(id, *target);
             }
-            // Follow the target before reading its prototype. This checks both
-            // target-only cycles and cycles involving ordinary prototype links.
-            prototypes.insert(id, *target);
         } else if let Object::ProxyRevoker {
             proxy: Some(proxy), ..
         } = heap.get(id)?
@@ -788,6 +812,23 @@ pub(super) fn check_heap_edges(
             current = next;
         }
         completed.extend(std::mem::take(&mut path));
+    }
+    let mut proxy_completed = BTreeSet::new();
+    let mut proxy_path = BTreeSet::new();
+    for &id in proxy_targets.keys() {
+        let mut current = id;
+        while !proxy_completed.contains(&current) {
+            if !proxy_path.insert(current) {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "proxy target chain of object {id} is cyclic"
+                )));
+            }
+            let Some(&next) = proxy_targets.get(&current) else {
+                break;
+            };
+            current = next;
+        }
+        proxy_completed.extend(std::mem::take(&mut proxy_path));
     }
     Ok(())
 }

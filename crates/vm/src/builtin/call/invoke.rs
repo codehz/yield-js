@@ -126,6 +126,9 @@ impl VmCore {
                 self.call_promise_callback(host, roots, id, args)
             }
             Some(Dispatch::ProxyRevoker(id)) => self.revoke_proxy(id),
+            Some(Dispatch::Proxy {
+                id, callable: true, ..
+            }) => self.invoke_proxy(host, roots, id, args, receiver, false),
             Some(Dispatch::Bound(bound)) => {
                 let target = Value::object(bound.target);
                 let bound_this = bound.bound_this.clone();
@@ -149,7 +152,60 @@ impl VmCore {
                     (id.definition::<P>().call)(self, host, roots, values, receiver)
                 }
             },
-            None => self.throw_type_error(roots, "value is not a function"),
+            Some(Dispatch::Proxy { .. }) | None => {
+                self.throw_type_error(roots, "value is not a function")
+            }
+        }
+    }
+
+    fn invoke_proxy<P: PlatformServices>(
+        &mut self,
+        host: &Host<P>,
+        roots: &ActiveRoots<'_>,
+        proxy: ObjectId,
+        args: Arguments<'_>,
+        receiver_or_new_target: &Value,
+        construct: bool,
+    ) -> Result<Invocation, VmError> {
+        let Object::Proxy { slots, .. } = self.heap.get(proxy)? else {
+            unreachable!("classified proxy")
+        };
+        let Some((target, handler)) = *slots else {
+            return self.throw_type_error(roots, "Proxy has been revoked");
+        };
+        // A trap getter can revoke the proxy while these slots are in use.
+        let live = (target, handler);
+        let roots = &roots.with(&live);
+        let target = Value::object(target);
+        let name = if construct { "construct" } else { "apply" };
+        let method = match self.proxy_get_method(host, roots, handler, name)? {
+            Ok(Some(method)) => method,
+            Ok(None) if construct => {
+                return self.construct_with(host, roots, &target, args, receiver_or_new_target);
+            }
+            Ok(None) => return self.invoke(host, roots, &target, args, receiver_or_new_target),
+            Err(error) => return Ok(Invocation::Thrown(error)),
+        };
+        let array = Value::object(self.heap.alloc_array(args.to_vec()?));
+        let forwarded = receiver_or_new_target.clone();
+        let trap_args = if construct {
+            [target, array, forwarded]
+        } else {
+            [target, forwarded, array]
+        };
+        match self.invoke(
+            host,
+            roots,
+            &method,
+            Arguments::Values(&trap_args),
+            &Value::object(handler),
+        )? {
+            Invocation::Value(value)
+                if construct && !matches!(value.view(), ValueRef::Object(_)) =>
+            {
+                self.throw_type_error(roots, "Proxy construct trap must return an object")
+            }
+            result => Ok(result),
         }
     }
 
@@ -172,11 +228,16 @@ impl VmCore {
     }
 
     pub(crate) fn is_constructor(&self, value: &Value) -> Result<bool, VmError> {
-        let dispatch = match self.classify(value)? {
-            Some(Dispatch::Bound(bound)) => self.classify(&Value::object(bound.target))?,
-            dispatch => dispatch,
-        };
-        Ok(self.constructor(dispatch)?.is_some())
+        let mut dispatch = self.classify(value)?;
+        loop {
+            match dispatch {
+                Some(Dispatch::Bound(bound)) => {
+                    dispatch = self.classify(&Value::object(bound.target))?;
+                }
+                Some(Dispatch::Proxy { constructible, .. }) => return Ok(constructible),
+                _ => return Ok(self.constructor(dispatch)?.is_some()),
+            }
+        }
     }
 
     pub(crate) fn construct_with<P: PlatformServices>(
@@ -208,6 +269,16 @@ impl VmCore {
                 Arguments::Values(&joined),
                 new_target,
             );
+        }
+        if let Some(Dispatch::Proxy {
+            id, constructible, ..
+        }) = dispatch
+        {
+            let roots = &roots.with(&args);
+            if !constructible {
+                return self.throw_type_error(roots, "value is not a constructor");
+            }
+            return self.invoke_proxy(host, roots, id, args, new_target, true);
         }
         let symbol = matches!(&dispatch, Some(Dispatch::Native { target: CallableTarget::Intrinsic(id), .. })
             if *id == symbol_family::CONSTRUCTOR.link());
@@ -573,6 +644,15 @@ impl VmCore {
             Object::Resolution(_) => Some(Dispatch::Resolution(id)),
             Object::PromiseCallback { .. } => Some(Dispatch::PromiseCallback(id)),
             Object::ProxyRevoker { .. } => Some(Dispatch::ProxyRevoker(id)),
+            Object::Proxy {
+                callable,
+                constructible,
+                ..
+            } => Some(Dispatch::Proxy {
+                id,
+                callable: *callable,
+                constructible: *constructible,
+            }),
             Object::Bound(bound) => Some(Dispatch::Bound(bound)),
             Object::Native(native) => Some(Dispatch::Native {
                 target: native.target(),

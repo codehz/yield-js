@@ -12,8 +12,11 @@ export function run() {
   expect(typeError(() => new Proxy())).toBe(true);
   expect(typeError(() => new Proxy(1, {}))).toBe(true);
   expect(typeError(() => new Proxy({}, null))).toBe(true);
-  expect(typeError(() => new Proxy(() => 1, {}))).toBe(true);
-  expect(typeError(() => new Proxy(new Map(), {}))).toBe(true);
+  const arrowProxy = new Proxy(() => 1, {});
+  expect(arrowProxy()).toBe(1);
+  const mapProxy = new Proxy(new Map(), {});
+  mapProxy.extra = 1;
+  expect(mapProxy.extra).toBe(1);
 
   const array = [1, , 3];
   const handler = { get: null, set: undefined, deleteProperty: null, ownKeys: undefined };

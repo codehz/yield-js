@@ -714,8 +714,6 @@ fn restore_rejects_malformed_proxy_records() {
     for (target_override, handler_override, message) in [
         (Some(u32::MAX), None, "missing object"),
         (None, Some(u32::MAX), "missing object"),
-        (Some(constructor), None, "invalid target"),
-        (None, Some(environment), "invalid handler"),
         (Some(proxy_id), None, "cyclic"),
     ] {
         let mut corrupt = snapshot.clone();

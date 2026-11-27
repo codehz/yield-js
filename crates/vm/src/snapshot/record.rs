@@ -10,7 +10,7 @@ use crate::heap::{CombineState, GeneratorObject, Object};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 
 // DOMException records carry the shared [[ErrorData]] presence bit.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 95;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 96;
 
 /// Version for the binary envelope and bincode options, not the snapshot record layout.
 pub const SNAPSHOT_BINARY_VERSION: u32 = 1;

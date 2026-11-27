@@ -68,41 +68,41 @@ pub(crate) mod namespace {
     #[function(name = "preventExtensions", length = 1)]
     fn prevent_extensions<P: PlatformServices>(
         vm: &mut VmCore,
-        _host: &Host<P>,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
-        vm.prevent_extensions_builtin_impl(roots, args, true)
+        vm.prevent_extensions_builtin_impl(host, roots, args, true)
     }
 
     #[function(name = "isExtensible", length = 1)]
     fn is_extensible<P: PlatformServices>(
         vm: &mut VmCore,
-        _host: &Host<P>,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
-        vm.is_extensible_builtin_impl(roots, args, true)
+        vm.is_extensible_builtin_impl(host, roots, args, true)
     }
 
     #[function(name = "getPrototypeOf", length = 1)]
     fn get_prototype_of<P: PlatformServices>(
         vm: &mut VmCore,
-        _host: &Host<P>,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
-        vm.get_prototype_of(roots, args, true)
+        vm.get_prototype_of(host, roots, args, true)
     }
 
     #[function(name = "setPrototypeOf", length = 2)]
     fn set_prototype_of<P: PlatformServices>(
         vm: &mut VmCore,
-        _host: &Host<P>,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
-        vm.set_prototype_of(roots, args, true)
+        vm.set_prototype_of(host, roots, args, true)
     }
 
     #[function(name = "get", length = 2)]

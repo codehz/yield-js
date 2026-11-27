@@ -1970,9 +1970,11 @@ pub enum Object {
         object: PlainObject,
         data: crate::builtin::fetch::form_data::FormDataIteratorRecord,
     },
-    /// A non-callable proxy over an ordinary object, array, or another proxy.
+    /// A proxy with call and construct capabilities fixed when created.
     Proxy {
         slots: Option<(ObjectId, ObjectId)>, // (target, handler); absent after revocation
+        callable: bool,
+        constructible: bool,
         object: PlainObject,
     },
     // Deleted slots remain empty so live cursors never shift.
@@ -2290,13 +2292,17 @@ impl PartialEq for Object {
             (
                 Proxy {
                     slots: a,
+                    callable: ac,
+                    constructible: ak,
                     object: x,
                 },
                 Proxy {
                     slots: b,
+                    callable: bc,
+                    constructible: bk,
                     object: y,
                 },
-            ) => a == b && x == y,
+            ) => a == b && ac == bc && ak == bk && x == y,
             (
                 ProxyRevoker {
                     proxy: a,

@@ -727,6 +727,9 @@ impl VmCore {
         key: PropertyKey,
         mut update: DescriptorUpdate,
     ) -> Result<Result<bool, Value>, VmError> {
+        if matches!(self.heap.get(target)?, Object::Proxy { .. }) {
+            return self.proxy_define_property(host, roots, target, key, update);
+        }
         let target = match self.proxy_base(roots, target)? {
             Ok(target) => target,
             Err(error) => return Ok(Err(error)),

@@ -78,13 +78,273 @@ impl VmCore {
         }
     }
 
-    pub(crate) fn proxy_prototype(
+    pub(crate) fn proxy_prototype<P: PlatformServices>(
         &mut self,
+        host: &Host<P>,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
     ) -> Result<Result<Option<ObjectId>, Value>, VmError> {
-        let base = unwrap_script!(self.proxy_base(roots, id));
-        Ok(Ok(self.heap.prototype_of(base)?))
+        let Object::Proxy { slots, .. } = *self.heap.get(id)? else {
+            return Ok(Ok(self.heap.prototype_of(id)?));
+        };
+        let Some((target, handler)) = slots else {
+            return Ok(Err(self.type_error(roots, "Proxy has been revoked")?));
+        };
+        let roots = &roots.with(&slots);
+        let Some(result) = unwrap_script!(self.proxy_trap(
+            host,
+            roots,
+            handler,
+            "getPrototypeOf",
+            vec![Value::object(target)]
+        )) else {
+            return self.proxy_prototype(host, roots, target);
+        };
+        let prototype = match result.view() {
+            ValueRef::Null => None,
+            ValueRef::Object(id) => Some(id),
+            _ => {
+                return Ok(Err(self.type_error(
+                    roots,
+                    "Proxy getPrototypeOf trap must return an object or null",
+                )?));
+            }
+        };
+        let roots = &roots.with(&prototype);
+        if !unwrap_script!(self.proxy_is_extensible(host, roots, target))
+            && prototype != unwrap_script!(self.proxy_prototype(host, roots, target))
+        {
+            return Ok(Err(self.type_error(
+                roots,
+                "Proxy getPrototypeOf trap contradicts a non-extensible target",
+            )?));
+        }
+        Ok(Ok(prototype))
+    }
+
+    pub(crate) fn proxy_set_prototype<P: PlatformServices>(
+        &mut self,
+        host: &Host<P>,
+        roots: &ActiveRoots<'_>,
+        id: ObjectId,
+        prototype: Option<ObjectId>,
+    ) -> Result<Result<bool, Value>, VmError> {
+        let Object::Proxy { slots, .. } = *self.heap.get(id)? else {
+            return Ok(Ok(self.heap.set_prototype(id, prototype)?));
+        };
+        let Some((target, handler)) = slots else {
+            return Ok(Err(self.type_error(roots, "Proxy has been revoked")?));
+        };
+        let live = (target, handler, prototype);
+        let roots = &roots.with(&live);
+        let Some(result) = unwrap_script!(self.proxy_trap(
+            host,
+            roots,
+            handler,
+            "setPrototypeOf",
+            vec![
+                Value::object(target),
+                prototype.map_or(Value::NULL, Value::object)
+            ]
+        )) else {
+            return self.proxy_set_prototype(host, roots, target, prototype);
+        };
+        if !result.truthy() {
+            return Ok(Ok(false));
+        }
+        if !unwrap_script!(self.proxy_is_extensible(host, roots, target))
+            && prototype != unwrap_script!(self.proxy_prototype(host, roots, target))
+        {
+            return Ok(Err(self.type_error(
+                roots,
+                "Proxy setPrototypeOf trap contradicts a non-extensible target",
+            )?));
+        }
+        Ok(Ok(true))
+    }
+
+    pub(crate) fn proxy_prevent_extensions<P: PlatformServices>(
+        &mut self,
+        host: &Host<P>,
+        roots: &ActiveRoots<'_>,
+        id: ObjectId,
+    ) -> Result<Result<bool, Value>, VmError> {
+        let Object::Proxy { slots, .. } = *self.heap.get(id)? else {
+            if self
+                .heap
+                .typed_array(id)?
+                .is_some_and(|view| view.byte_length.is_none())
+            {
+                return Ok(Ok(false));
+            }
+            self.heap.get_mut(id)?.prevent_extensions();
+            return Ok(Ok(true));
+        };
+        let Some((target, handler)) = slots else {
+            return Ok(Err(self.type_error(roots, "Proxy has been revoked")?));
+        };
+        let roots = &roots.with(&slots);
+        let Some(result) = unwrap_script!(self.proxy_trap(
+            host,
+            roots,
+            handler,
+            "preventExtensions",
+            vec![Value::object(target)]
+        )) else {
+            return self.proxy_prevent_extensions(host, roots, target);
+        };
+        let accepted = result.truthy();
+        if accepted && unwrap_script!(self.proxy_is_extensible(host, roots, target)) {
+            return Ok(Err(self.type_error(
+                roots,
+                "Proxy preventExtensions trap left the target extensible",
+            )?));
+        }
+        Ok(Ok(accepted))
+    }
+
+    pub(crate) fn proxy_define_property<P: PlatformServices>(
+        &mut self,
+        host: &Host<P>,
+        roots: &ActiveRoots<'_>,
+        id: ObjectId,
+        key: PropertyKey,
+        update: DescriptorUpdate,
+    ) -> Result<Result<bool, Value>, VmError> {
+        let Object::Proxy { slots, .. } = *self.heap.get(id)? else {
+            return self.try_apply_property_update(host, roots, id, key, update);
+        };
+        let Some((target, handler)) = slots else {
+            return Ok(Err(self.type_error(roots, "Proxy has been revoked")?));
+        };
+        let roots = &roots.with(&slots);
+        let inputs = (&key, &update);
+        let trap_roots = &roots.with(&inputs);
+        let Some(method) =
+            unwrap_script!(self.proxy_get_method(host, trap_roots, handler, "defineProperty"))
+        else {
+            return self.proxy_define_property(host, roots, target, key, update);
+        };
+        let descriptor = self.heap.alloc_plain();
+        let fields = [
+            ("value", update.value.clone()),
+            ("writable", update.writable.map(Value::boolean)),
+            (
+                "get",
+                update
+                    .get
+                    .map(|get| get.map_or(Value::UNDEFINED, Value::object)),
+            ),
+            (
+                "set",
+                update
+                    .set
+                    .map(|set| set.map_or(Value::UNDEFINED, Value::object)),
+            ),
+            ("enumerable", update.enumerable.map(Value::boolean)),
+            ("configurable", update.configurable.map(Value::boolean)),
+        ];
+        for (name, value) in fields {
+            if let Some(value) = value {
+                self.heap
+                    .define_data(descriptor, name, value, Attributes::ORDINARY)?;
+            }
+        }
+        let args = [
+            Value::object(target),
+            key_value(key.borrowed()),
+            Value::object(descriptor),
+        ];
+        match self.invoke(
+            host,
+            trap_roots,
+            &method,
+            Arguments::Values(&args),
+            &Value::object(handler),
+        )? {
+            Invocation::Thrown(error) => return Ok(Err(error)),
+            Invocation::Value(value) if !value.truthy() => return Ok(Ok(false)),
+            Invocation::Value(_) => {}
+        }
+        let current = unwrap_script!(self.own_descriptor(host, trap_roots, target, key.borrowed()));
+        let property = current.as_ref().map(|(property, _)| property);
+        let extensible =
+            unwrap_script!(self.proxy_is_extensible(host, &trap_roots.with(&property), target));
+        let setting_fixed = update.configurable == Some(false);
+        let invalid = match &current {
+            None => !extensible || setting_fixed,
+            Some((property, attrs)) => {
+                setting_fixed && attrs.configurable
+                    || !attrs.configurable
+                        && attrs.writable
+                        && matches!(property, Property::Data(_))
+                        && update.writable == Some(false)
+                    || update
+                        .complete(extensible, Some(OwnProperty::Stored(property, *attrs)))
+                        .is_none()
+            }
+        };
+        if invalid {
+            return Ok(Err(self.type_error(
+                roots,
+                "Proxy defineProperty trap reported an incompatible descriptor",
+            )?));
+        }
+        Ok(Ok(true))
+    }
+
+    pub(crate) fn proxy_is_extensible<P: PlatformServices>(
+        &mut self,
+        host: &Host<P>,
+        roots: &ActiveRoots<'_>,
+        id: ObjectId,
+    ) -> Result<Result<bool, Value>, VmError> {
+        let Object::Proxy { slots, .. } = *self.heap.get(id)? else {
+            return Ok(Ok(self.heap.get(id)?.is_extensible()));
+        };
+        let Some((target, handler)) = slots else {
+            return Ok(Err(self.type_error(roots, "Proxy has been revoked")?));
+        };
+        let roots = &roots.with(&slots);
+        let Some(result) = unwrap_script!(self.proxy_trap(
+            host,
+            roots,
+            handler,
+            "isExtensible",
+            vec![Value::object(target)]
+        )) else {
+            return self.proxy_is_extensible(host, roots, target);
+        };
+        let result = result.truthy();
+        if result != unwrap_script!(self.proxy_is_extensible(host, roots, target)) {
+            return Ok(Err(self.type_error(
+                roots,
+                "Proxy isExtensible trap result does not match the target",
+            )?));
+        }
+        Ok(Ok(result))
+    }
+
+    pub(crate) fn proxy_get_method<P: PlatformServices>(
+        &mut self,
+        host: &Host<P>,
+        roots: &ActiveRoots<'_>,
+        handler: ObjectId,
+        name: &str,
+    ) -> Result<Result<Option<Value>, Value>, VmError> {
+        let handler = Value::object(handler);
+        match self.read_property(host, roots, &handler, PropertyKeyRef::String(name))? {
+            Invocation::Value(value)
+                if matches!(value.view(), ValueRef::Undefined | ValueRef::Null) =>
+            {
+                Ok(Ok(None))
+            }
+            Invocation::Value(value) if !self.is_callable(&value) => {
+                Ok(Err(self.type_error(roots, "Proxy trap is not callable")?))
+            }
+            Invocation::Value(value) => Ok(Ok(Some(value))),
+            Invocation::Thrown(error) => Ok(Err(error)),
+        }
     }
 
     fn proxy_revocable(
@@ -155,29 +415,13 @@ impl VmCore {
                 self.type_error(roots, "Proxy requires an object handler")?
             ));
         };
-        if !matches!(
-            self.heap.get(target)?,
-            Object::Plain(_)
-                | Object::Array(_)
-                | Object::Boxed { .. }
-                | Object::Date { .. }
-                | Object::DomException { .. }
-                | Object::Event { .. }
-                | Object::EventTarget { .. }
-                | Object::Performance { .. }
-                | Object::AbortController { .. }
-                | Object::AbortSignal { .. }
-                | Object::ArrayBuffer(_)
-                | Object::TypedArray(_)
-                | Object::DataView(_)
-                | Object::Proxy { .. }
-        ) {
-            return Ok(Err(
-                self.type_error(roots, "Unsupported Proxy target object")?
-            ));
-        }
+        let target_value = Value::object(target);
+        let callable = self.is_callable(&target_value);
+        let constructible = self.is_constructor(&target_value)?;
         Ok(Ok(self.heap.alloc(Object::Proxy {
             slots: Some((target, handler)),
+            callable,
+            constructible,
             object: PlainObject::new(None),
         })))
     }
@@ -190,25 +434,15 @@ impl VmCore {
         name: &str,
         args: Vec<Value>,
     ) -> Result<Result<Option<Value>, Value>, VmError> {
-        let handler = Value::object(handler);
-        let trap = self.read_property(
-            host,
-            &roots.with(&(&handler, &args)),
-            &handler,
-            PropertyKeyRef::String(name),
-        )?;
-        match trap {
-            Invocation::Value(value)
-                if matches!(value.view(), ValueRef::Undefined | ValueRef::Null) =>
-            {
-                Ok(Ok(None))
-            }
-            Invocation::Value(method) => {
-                match self.invoke(host, roots, &method, Arguments::Values(&args), &handler)? {
-                    Invocation::Value(value) => Ok(Ok(Some(value))),
-                    Invocation::Thrown(error) => Ok(Err(error)),
-                }
-            }
+        let receiver = Value::object(handler);
+        let trap_roots_view = (&receiver, &args);
+        let lookup_roots = &roots.with(&trap_roots_view);
+        let Some(method) = unwrap_script!(self.proxy_get_method(host, lookup_roots, handler, name))
+        else {
+            return Ok(Ok(None));
+        };
+        match self.invoke(host, roots, &method, Arguments::Values(&args), &receiver)? {
+            Invocation::Value(value) => Ok(Ok(Some(value))),
             Invocation::Thrown(error) => Ok(Err(error)),
         }
     }
@@ -346,16 +580,26 @@ impl VmCore {
             Ok(None) => return self.has_property_key(host, roots, target, key),
         };
         if flag == delete {
-            let base = match self.proxy_base(roots, target)? {
-                Ok(base) => base,
+            let attrs = match self.own_descriptor(host, roots, target, key)? {
+                Ok(Some((_, attrs))) => Some(attrs),
+                Ok(None) => None,
                 Err(error) => return Ok(Invocation::Thrown(error)),
             };
-            let extensible = self.heap.get(base)?.is_extensible();
-            match self.own_descriptor(host, roots, target, key)? {
-                Err(error) => return Ok(Invocation::Thrown(error)),
-                Ok(Some((_, attrs))) if !attrs.configurable || !extensible => return self.throw_type_error(roots, "Proxy trap contradicts a protected own property"),
-                Ok(None) if delete && !extensible => return self.throw_type_error(roots, "Proxy deleteProperty trap cannot report success for a missing property on a non-extensible target"),
-                _ => {}
+            if let Some(attrs) = attrs {
+                let protected = if !attrs.configurable {
+                    true
+                } else {
+                    match self.proxy_is_extensible(host, roots, target)? {
+                        Ok(extensible) => !extensible,
+                        Err(error) => return Ok(Invocation::Thrown(error)),
+                    }
+                };
+                if protected {
+                    return self.throw_type_error(
+                        roots,
+                        "Proxy trap contradicts a protected own property",
+                    );
+                }
             }
         }
         Ok(Invocation::Value(Value::boolean(flag)))
@@ -474,28 +718,29 @@ impl VmCore {
             }
             keys.push(key);
         }
-        let base = unwrap_script!(self.proxy_base(roots, target));
-        let extensible = self.heap.get(base)?.is_extensible();
         let roots = &roots.with(&keys);
+        let extensible = unwrap_script!(self.proxy_is_extensible(host, roots, target));
         let target_keys = unwrap_script!(self.own_keys(host, roots, target, false));
+        let roots = &roots.with(&target_keys);
+        let mut omitted_protected_key = false;
+        for key in &target_keys {
+            let descriptor =
+                unwrap_script!(self.own_descriptor(host, roots, target, key.borrowed()));
+            omitted_protected_key |= (!extensible
+                || descriptor.is_some_and(|(_, attrs)| !attrs.configurable))
+                && !seen.contains(key);
+        }
+        if omitted_protected_key {
+            return Ok(Err(self.type_error(
+                roots,
+                "Proxy ownKeys trap omitted a protected key",
+            )?));
+        }
         if !extensible && target_keys.len() != keys.len() {
             return Ok(Err(self.type_error(
                 roots,
                 "Proxy ownKeys trap changed keys of a non-extensible target",
             )?));
-        }
-        let roots = &roots.with(&target_keys);
-        for key in &target_keys {
-            let descriptor =
-                unwrap_script!(self.own_descriptor(host, roots, target, key.borrowed()));
-            if (!extensible || descriptor.is_some_and(|(_, attrs)| !attrs.configurable))
-                && !seen.contains(key)
-            {
-                return Ok(Err(self.type_error(
-                    roots,
-                    "Proxy ownKeys trap omitted a protected key",
-                )?));
-            }
         }
         Ok(Ok(keys))
     }
@@ -566,8 +811,8 @@ impl VmCore {
         }
         let roots = &roots.with(&result);
         let current = unwrap_script!(self.own_descriptor(host, roots, target, key));
-        let base = unwrap_script!(self.proxy_base(roots, target));
-        let extensible = self.heap.get(base)?.is_extensible();
+        let current_property = current.as_ref().map(|(property, _)| property);
+        let roots = &roots.with(&current_property);
         let invalid = |vm: &mut Self| {
             Ok(Err(vm.type_error(
                 roots,
@@ -575,25 +820,31 @@ impl VmCore {
             )?))
         };
         if result == Value::UNDEFINED {
-            return if current.is_some_and(|(_, attrs)| !attrs.configurable || !extensible) {
+            let Some((_, attrs)) = current else {
+                return Ok(Ok(None));
+            };
+            return if !attrs.configurable
+                || !unwrap_script!(self.proxy_is_extensible(host, roots, target))
+            {
                 invalid(self)
             } else {
                 Ok(Ok(None))
             };
         }
-        let current_property = current.as_ref().map(|(property, _)| property);
-        let update = unwrap_script!(self.read_property_descriptor(
-            host,
-            &roots.with(&current_property),
-            &result
-        ));
+        let extensible = unwrap_script!(self.proxy_is_extensible(host, roots, target));
+        let update = unwrap_script!(self.read_property_descriptor(host, roots, &result));
         let Some((property, attrs)) = update.complete(true, None) else {
             unreachable!()
         };
         if !attrs.configurable
-            && current
-                .as_ref()
-                .is_none_or(|(_, old)| old.configurable || !attrs.writable && old.writable)
+            && current.as_ref().is_none_or(|(old_property, old)| {
+                old.configurable
+                    || matches!(
+                        (&property, old_property),
+                        (Property::Data(_), Property::Data(_))
+                    ) && !attrs.writable
+                        && old.writable
+            })
         {
             return invalid(self);
         }
@@ -674,7 +925,7 @@ impl VmCore {
                     }
                     visited.insert(key);
                 } else {
-                    let prototype = unwrap_script!(self.proxy_prototype(roots, id));
+                    let prototype = unwrap_script!(self.proxy_prototype(host, roots, id));
                     let Object::ForInIterator {
                         current, pending, ..
                     } = self.heap.get_mut(iterator)?

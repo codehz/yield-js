@@ -63,8 +63,8 @@ pub(crate) mod members {
         entries: 1 => |vm, host, roots, args, _| vm.object_values_or_entries(host, roots, &args, true);
         fromEntries: 1 => |vm, host, roots, args, _| vm.object_from_entries(host, roots, &args);
         create: 2 => |vm, host, roots, args, _| vm.object_create(host, roots, &args);
-        getPrototypeOf: 1 => |vm, _, roots, args, _| vm.get_prototype_of(roots, &args, false);
-        setPrototypeOf: 2 => |vm, _, roots, args, _| vm.set_prototype_of(roots, &args, false);
+        getPrototypeOf: 1 => |vm, host, roots, args, _| vm.get_prototype_of(host, roots, &args, false);
+        setPrototypeOf: 2 => |vm, host, roots, args, _| vm.set_prototype_of(host, roots, &args, false);
         getOwnPropertyDescriptor: 2 => |vm, host, roots, args, _| vm.get_own_property_descriptor(host, roots, &args, false);
         getOwnPropertyDescriptors: 1 => |vm, host, roots, args, _| vm.get_own_property_descriptors(host, roots, &args);
         defineProperty: 3 => |vm, host, roots, args, _| vm.define_property_builtin(host, roots, &args, false);
@@ -74,8 +74,8 @@ pub(crate) mod members {
             };
             vm.define_properties(host, roots, target, args.get(1))
         };
-        preventExtensions: 1 => |vm, _, roots, args, _| vm.prevent_extensions_builtin_impl(roots, &args, false);
-        isExtensible: 1 => |vm, _, roots, args, _| vm.is_extensible_builtin_impl(roots, &args, false);
+        preventExtensions: 1 => |vm, host, roots, args, _| vm.prevent_extensions_builtin_impl(host, roots, &args, false);
+        isExtensible: 1 => |vm, host, roots, args, _| vm.is_extensible_builtin_impl(host, roots, &args, false);
         seal: 1 => |vm, host, roots, args, _| vm.set_integrity(host, roots, &args, IntegrityLevel::Sealed);
         isSealed: 1 => |vm, host, roots, args, _| vm.test_integrity(host, roots, &args, IntegrityLevel::Sealed);
         freeze: 1 => |vm, host, roots, args, _| vm.set_integrity(host, roots, &args, IntegrityLevel::Frozen);
@@ -86,7 +86,7 @@ pub(crate) mod members {
 
     prototype_calls! {
         hasOwnProperty: 1 => |vm, host, roots, args, receiver| test_own_property(vm, host, roots, &args, receiver, false);
-        isPrototypeOf: 1 => |vm, _, roots, args, receiver| {
+        isPrototypeOf: 1 => |vm, host, roots, args, receiver| {
             let result = |value| Ok(Invocation::Value(Value::boolean(value)));
             let Some(ValueRef::Object(target)) = args.first().map(Value::view) else {
                 return result(false);
@@ -100,7 +100,7 @@ pub(crate) mod members {
             };
             let mut current = target;
             loop {
-                let id = match vm.proxy_prototype(roots, current)? {
+                let id = match vm.proxy_prototype(host, roots, current)? {
                     Ok(Some(id)) => id,
                     Ok(None) => break,
                     Err(error) => return Ok(Invocation::Thrown(error)),
