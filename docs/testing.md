@@ -5,7 +5,7 @@
 全部测试经 `cargo test` 运行。四层结构：
 
 1. `crates/compiler/tests/compile.rs` — 双 `await` 示例的字节码形状与不支持语法的位置。
-2. `crates/harness/tests/e2e.rs` 与 `crates/harness/tests/e2e/` 模块 — 快照身份、加载器拒绝、跨 `await` 的 `finally`、可达性、生成器恢复表、GC 等。用 `matches!` 断言 `VmError`。
+2. `crates/harness/tests/e2e.rs` 与 `crates/harness/tests/e2e/` 模块 — 快照身份、加载器拒绝、跨 `await` 的 `finally`、可达性、生成器恢复表、GC 等。用 `matches!` 断言 `VmError`。`e2e/react_compat.rs` 用锁定的 React 19 / `scheduler` 生产 bundle 做编译与调度器恢复探针。
 3. `crates/harness/tests/cases/` — 由 `build.rs` 生成测试的语义 `.js` 用例（见下）。
 4. `crates/host-dts/src/lib.rs` 单元测试，以及 `crates/binding-macros/tests/host_dts_fixture.rs`：它构建一个一次性消费 crate 并运行 `cargo check`，证明“已声明但未实现”的导出在宏展开期失败。
 
