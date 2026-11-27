@@ -1708,7 +1708,7 @@ const NEW_TARGET_BINDING: &str = "\0new.target";
 macro_rules! scan_class_keys {
     () => {
         fn visit_property_definition(&mut self, field: &PropertyDefinition<'a>) {
-            if field.computed {
+            if field.key.is_computed() {
                 self.visit_property_key(&field.key);
             }
         }

@@ -277,10 +277,10 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 ClassElement::PropertyDefinition(field) => {
                     let key = match &field.key {
                         PropertyKey::PrivateIdentifier(_) => None,
-                        key => Some(self.compile_property_key(key, field.computed)?),
+                        key => Some(self.compile_property_key(key)?),
                     };
                     let name_from_key =
-                        field.computed || self.static_key_name(&field.key)?.is_none();
+                        field.key.is_computed() || self.static_key_name(&field.key)?.is_none();
                     let initializer = if let Some(value) = &field.value {
                         let function = self.enqueue_function(
                             FunctionSource::ClassField(value, &field.key, name_from_key),
@@ -333,10 +333,10 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             };
             let key = match &method.key {
                 PropertyKey::PrivateIdentifier(_) => None,
-                key => Some(self.compile_property_key(key, method.computed)?),
+                key => Some(self.compile_property_key(key)?),
             };
             let name = self.static_key_name(&method.key)?;
-            let name_from_key = method.computed || name.is_none();
+            let name_from_key = method.key.is_computed() || name.is_none();
             let initial_name = if name_from_key {
                 String::new()
             } else {

@@ -595,10 +595,10 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     ) -> Result<Option<String>, CompileError> {
         Ok(match key {
             PropertyKey::PrivateIdentifier(id) => Some(format!("#{}", id.name)),
-            PropertyKey::StringLiteral(literal) => {
+            PropertyKey::StaticStringLiteral(literal) | PropertyKey::StringLiteral(literal) => {
                 self.string_literal_text(literal)?.to_utf8().ok()
             }
-            PropertyKey::NumericLiteral(literal) => {
+            PropertyKey::StaticNumericLiteral(literal) | PropertyKey::NumericLiteral(literal) => {
                 Some(ryu_js::Buffer::new().format(literal.value).to_owned())
             }
             key => key
@@ -630,25 +630,17 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     pub(super) fn compile_property_key(
         &mut self,
         key: &'ast PropertyKey<'ast>,
-        computed: bool,
     ) -> Result<Reg, CompileError> {
-        if computed {
-            let expression = key.as_expression().ok_or_else(|| {
-                unsupported(
-                    self.source_text(),
-                    key.span(),
-                    "unsupported computed property key",
-                )
-            })?;
+        if let Some(expression) = key.as_expression() {
             let value = self.compile_expression(expression)?;
             self.emit_to_property_key(value, None)
-        } else if let PropertyKey::StringLiteral(literal) = key {
+        } else if let PropertyKey::StaticStringLiteral(literal) = key {
             let text = self.string_literal_text(literal)?;
             self.emit_constant(Constant::String(text))
-        } else if let PropertyKey::NumericLiteral(literal) = key {
+        } else if let PropertyKey::StaticNumericLiteral(literal) = key {
             let mut buffer = ryu_js::Buffer::new();
             self.emit_constant(Constant::String(buffer.format(literal.value).into()))
-        } else if let PropertyKey::BigIntLiteral(literal) = key {
+        } else if let PropertyKey::StaticBigIntLiteral(literal) = key {
             self.emit_constant(Constant::String(literal.value.as_str().into()))
         } else if let Some(name) = key.static_name().and_then(|name| name.into_cow_str()) {
             self.emit_constant(Constant::String(name.as_ref().into()))
@@ -2042,9 +2034,9 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 });
                 continue;
             };
-            let key = self.compile_property_key(&property.key, property.computed)?;
+            let key = self.compile_property_key(&property.key)?;
             let name = self.static_key_name(&property.key)?;
-            let name_from_key = property.computed || name.is_none();
+            let name_from_key = property.key.is_computed() || name.is_none();
             let kind = match property.kind {
                 PropertyKind::Init => PropertyDefinition::Data,
                 PropertyKind::Get => PropertyDefinition::Get,

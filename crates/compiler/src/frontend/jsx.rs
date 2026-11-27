@@ -229,8 +229,12 @@ impl<'a> Lower<'a> {
     }
 
     fn prop(&self, span: Span, name: &'a str, value: Expression<'a>) -> ObjectPropertyKind<'a> {
-        let key = PropertyKey::new_string_literal(span, name, None, &self.ast);
         // A JSX prop named __proto__ is data, not an object-literal prototype setter.
+        let key = if name == "__proto__" {
+            PropertyKey::new_string_literal(span, name, None, &self.ast)
+        } else {
+            PropertyKey::new_static_string_literal(span, name, None, &self.ast)
+        };
         ObjectPropertyKind::new_object_property(
             span,
             PropertyKind::Init,
@@ -238,7 +242,6 @@ impl<'a> Lower<'a> {
             value,
             false,
             false,
-            name == "__proto__",
             &self.ast,
         )
     }
@@ -310,7 +313,6 @@ impl<'a> Lower<'a> {
             SPAN,
             PropertyKey::new_static_identifier(SPAN, "key", ast),
             binding(key),
-            false,
             false,
             ast,
         );

@@ -136,7 +136,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 self.assert_pattern_object(value);
                 let mut excluded = Vec::new();
                 for property in &pattern.properties {
-                    let key = self.compile_property_key(&property.key, property.computed)?;
+                    let key = self.compile_property_key(&property.key)?;
                     let item = self.read_pattern_property(value, key)?;
                     self.compile_binding_pattern(&property.value, item)?;
                     if pattern.rest.is_some() {
@@ -163,8 +163,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                             property.binding.name.as_str(),
                         ),
                         AssignmentTargetProperty::AssignmentTargetPropertyProperty(property) => {
-                            let key =
-                                self.compile_property_key(&property.name, property.computed)?;
+                            let key = self.compile_property_key(&property.name)?;
                             let (target, init) = assignment_element(&property.binding);
                             let name = target.identifier_name();
                             (key, self.prepare_pattern(target)?, init, name)

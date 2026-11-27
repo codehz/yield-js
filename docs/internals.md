@@ -133,7 +133,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 - `crates/harness/tests/cases` — 语义 `.js` 夹具；每个生成一个 `#[test]`
 
 关键文件：
-- `Cargo.toml` — workspace 成员与锁定依赖（`oxc = "=0.159.0"`，启用 `ast_visit`）
+- `Cargo.toml` — workspace 成员与锁定依赖（`oxc = "=0.160.0"`，启用 `ast_visit`）
 - `crates/compiler/src/lib.rs` — `Compiler` 与 `Project`；`transform.rs` 定义公开转换接口
 - `crates/host-dts/src/lib.rs` — `parse(source) -> module/export name tables`，带位置的拒绝
 - `crates/vm/src/lib.rs` — 再导出：`Build`、`Vm`、`Host`、`Snapshot`、`Value`、`VmError`
