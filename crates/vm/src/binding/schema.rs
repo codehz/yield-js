@@ -351,6 +351,7 @@ impl ExportDecl {
 pub enum SlotKind {
     Js,
     JsList,
+    JsWeak,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

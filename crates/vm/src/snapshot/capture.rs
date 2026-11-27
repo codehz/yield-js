@@ -3,7 +3,7 @@
 use crate::binding::Recovery;
 use crate::builtin::roots::BuiltinRoots;
 use crate::error::VmError;
-use crate::gc::ActiveRoots;
+use crate::gc::{ActiveRoots, LiveSet};
 use crate::heap::{Heap, Object};
 use crate::host::{Host, PlatformServices};
 use crate::init::{RestoreOptions, SnapshotValidation};
@@ -224,10 +224,7 @@ impl VmCore {
             let slots = instance
                 .slots
                 .iter()
-                .map(|slot| match slot {
-                    HostSlot::Js(value) => HostSlotRecord::Js(value.clone()),
-                    HostSlot::JsList(values) => HostSlotRecord::JsList(values.clone()),
-                })
+                .map(|slot| record_host_slot(slot, &live))
                 .collect();
             let payload = if bindings.class_has_payload_codec(class) {
                 let payload = instance.payload.as_ref().ok_or_else(|| {
@@ -252,10 +249,7 @@ impl VmCore {
             let slots = state
                 .slots
                 .iter()
-                .map(|slot| match slot {
-                    HostSlot::Js(value) => HostSlotRecord::Js(value.clone()),
-                    HostSlot::JsList(values) => HostSlotRecord::JsList(values.clone()),
-                })
+                .map(|slot| record_host_slot(slot, &live))
                 .collect();
             let mut bytes = Vec::new();
             bindings
@@ -643,5 +637,15 @@ impl VmCore {
             }
         }
         Ok(())
+    }
+}
+
+fn record_host_slot(slot: &HostSlot, live: &LiveSet) -> HostSlotRecord {
+    match slot {
+        HostSlot::Js(value) => HostSlotRecord::Js(value.clone()),
+        HostSlot::JsList(values) => HostSlotRecord::JsList(values.clone()),
+        HostSlot::JsWeak(key) => {
+            HostSlotRecord::JsWeak(key.filter(|key| live.contains_weak_key(*key)))
+        }
     }
 }

@@ -2,7 +2,9 @@ use std::cell::RefCell;
 use std::fmt;
 
 use crate::gc::{ActiveRoots, TraceRoots, Tracer};
-use crate::heap::{Attributes, EventState, EventTargetState, Object, PlainObject, Property};
+use crate::heap::{
+    Attributes, EventState, EventTargetState, Object, PlainObject, Property, WeakKey,
+};
 use crate::intrinsic::{ClassArgs, ClassDef};
 use crate::intrinsics::{IntrinsicClass, TypeError};
 use crate::runtime::Invocation;
@@ -375,6 +377,7 @@ impl<M: HostModule> ModuleCx<'_, M> {
     pub fn state_slot(&self, index: usize) -> JsResult<JsValue> {
         match self.call.vm.module_states[self.module].slots.get(index) {
             Some(crate::runtime::HostSlot::Js(value)) => Ok(self.js_value(value.clone())),
+            Some(crate::runtime::HostSlot::JsWeak(key)) => Ok(self.weak_slot_js(*key)),
             Some(crate::runtime::HostSlot::JsList(_)) => Err(JsError::Fault(HostFault::new(
                 "module state slot is a JavaScript list",
             ))),
@@ -385,10 +388,25 @@ impl<M: HostModule> ModuleCx<'_, M> {
     }
 
     pub fn set_state_slot(&mut self, index: usize, value: JsValue) -> JsResult<()> {
-        self.check_value(&value)?;
-        match self.call.vm.module_states[self.module].slots.get_mut(index) {
-            Some(crate::runtime::HostSlot::Js(slot)) => {
+        match self.call.vm.module_states[self.module].slots.get(index) {
+            Some(crate::runtime::HostSlot::Js(_)) => {
+                self.check_value(&value)?;
+                let crate::runtime::HostSlot::Js(slot) =
+                    &mut self.call.vm.module_states[self.module].slots[index]
+                else {
+                    unreachable!("slot kind is stable")
+                };
                 *slot = value.value;
+                Ok(())
+            }
+            Some(crate::runtime::HostSlot::JsWeak(_)) => {
+                let key = self.decode_weak_slot(&value)?;
+                let crate::runtime::HostSlot::JsWeak(slot) =
+                    &mut self.call.vm.module_states[self.module].slots[index]
+                else {
+                    unreachable!("slot kind is stable")
+                };
+                *slot = key;
                 Ok(())
             }
             Some(crate::runtime::HostSlot::JsList(_)) => Err(JsError::Fault(HostFault::new(
@@ -403,9 +421,9 @@ impl<M: HostModule> ModuleCx<'_, M> {
     pub fn state_list_len(&self, index: usize) -> JsResult<usize> {
         match self.call.vm.module_states[self.module].slots.get(index) {
             Some(crate::runtime::HostSlot::JsList(values)) => Ok(values.len()),
-            Some(crate::runtime::HostSlot::Js(_)) => Err(JsError::Fault(HostFault::new(
-                "module state slot is a JavaScript value",
-            ))),
+            Some(crate::runtime::HostSlot::Js(_) | crate::runtime::HostSlot::JsWeak(_)) => Err(
+                JsError::Fault(HostFault::new("module state slot is a JavaScript value")),
+            ),
             None => Err(JsError::Fault(HostFault::new(
                 "module state slot index out of range",
             ))),
@@ -419,9 +437,9 @@ impl<M: HostModule> ModuleCx<'_, M> {
                 values.push(value.value);
                 Ok(())
             }
-            Some(crate::runtime::HostSlot::Js(_)) => Err(JsError::Fault(HostFault::new(
-                "module state slot is a JavaScript value",
-            ))),
+            Some(crate::runtime::HostSlot::Js(_) | crate::runtime::HostSlot::JsWeak(_)) => Err(
+                JsError::Fault(HostFault::new("module state slot is a JavaScript value")),
+            ),
             None => Err(JsError::Fault(HostFault::new(
                 "module state slot index out of range",
             ))),
@@ -1029,6 +1047,7 @@ impl<'a> CallCx<'a> {
             .map(|slot| match slot.kind {
                 SlotKind::Js => crate::runtime::HostSlot::Js(Value::UNDEFINED),
                 SlotKind::JsList => crate::runtime::HostSlot::JsList(Vec::new()),
+                SlotKind::JsWeak => crate::runtime::HostSlot::JsWeak(None),
             });
         let slots = slots.collect();
         self.vm.host_instances.insert(
@@ -1206,6 +1225,25 @@ impl<'a> CallCx<'a> {
         }
     }
 
+    fn weak_slot_js(&self, key: Option<WeakKey>) -> JsValue {
+        match key {
+            None => JsValue::undefined(),
+            Some(key) => self.js_value(key.to_value()),
+        }
+    }
+
+    fn decode_weak_slot(&mut self, value: &JsValue) -> JsResult<Option<WeakKey>> {
+        self.check_value(value)?;
+        if value.is_undefined() {
+            return Ok(None);
+        }
+        self.vm
+            .heap
+            .weak_key(&value.value)
+            .ok_or_else(|| self.type_error("invalid weak slot target"))
+            .map(Some)
+    }
+
     pub(crate) fn into_value(self, value: JsValue) -> Result<Value, HostFault> {
         match value.origin {
             Origin::Constant => Ok(value.value),
@@ -1229,6 +1267,7 @@ impl<'a> CallCx<'a> {
         let instance = self.instance_record(id)?;
         match instance.slots.get(index) {
             Some(crate::runtime::HostSlot::Js(value)) => Ok(self.js_value(value.clone())),
+            Some(crate::runtime::HostSlot::JsWeak(key)) => Ok(self.weak_slot_js(*key)),
             Some(crate::runtime::HostSlot::JsList(_)) => {
                 Err(JsError::Fault(HostFault::new("slot is a JavaScript list")))
             }
@@ -1242,22 +1281,42 @@ impl<'a> CallCx<'a> {
         index: usize,
         value: JsValue,
     ) -> JsResult<()> {
-        self.check_value(&value)?;
-        let value = value.value;
-        let instance = self
-            .vm
-            .host_instances
-            .get_mut(&id)
-            .ok_or_else(|| JsError::Fault(HostFault::new("value is not a host instance")))?;
-        match instance.slots.get_mut(index) {
-            Some(crate::runtime::HostSlot::Js(slot)) => {
-                *slot = value;
+        let tag = {
+            let instance =
+                self.vm.host_instances.get(&id).ok_or_else(|| {
+                    JsError::Fault(HostFault::new("value is not a host instance"))
+                })?;
+            match instance.slots.get(index) {
+                Some(crate::runtime::HostSlot::Js(_)) => 0u8,
+                Some(crate::runtime::HostSlot::JsWeak(_)) => 1,
+                Some(crate::runtime::HostSlot::JsList(_)) => 2,
+                None => {
+                    return Err(JsError::Fault(HostFault::new("slot index out of range")));
+                }
+            }
+        };
+        match tag {
+            0 => {
+                self.check_value(&value)?;
+                let crate::runtime::HostSlot::Js(slot) =
+                    &mut self.vm.host_instances.get_mut(&id).unwrap().slots[index]
+                else {
+                    unreachable!("slot kind is stable")
+                };
+                *slot = value.value;
                 Ok(())
             }
-            Some(crate::runtime::HostSlot::JsList(_)) => {
-                Err(JsError::Fault(HostFault::new("slot is a JavaScript list")))
+            1 => {
+                let key = self.decode_weak_slot(&value)?;
+                let crate::runtime::HostSlot::JsWeak(slot) =
+                    &mut self.vm.host_instances.get_mut(&id).unwrap().slots[index]
+                else {
+                    unreachable!("slot kind is stable")
+                };
+                *slot = key;
+                Ok(())
             }
-            None => Err(JsError::Fault(HostFault::new("slot index out of range"))),
+            _ => Err(JsError::Fault(HostFault::new("slot is a JavaScript list"))),
         }
     }
 
@@ -1265,9 +1324,9 @@ impl<'a> CallCx<'a> {
         let instance = self.instance_record(id)?;
         match instance.slots.get(index) {
             Some(crate::runtime::HostSlot::JsList(values)) => Ok(values.len()),
-            Some(crate::runtime::HostSlot::Js(_)) => Err(JsError::Fault(HostFault::new(
-                "slot is a single JavaScript value",
-            ))),
+            Some(crate::runtime::HostSlot::Js(_) | crate::runtime::HostSlot::JsWeak(_)) => Err(
+                JsError::Fault(HostFault::new("slot is a single JavaScript value")),
+            ),
             None => Err(JsError::Fault(HostFault::new("slot index out of range"))),
         }
     }
@@ -1285,9 +1344,9 @@ impl<'a> CallCx<'a> {
                 .cloned()
                 .map(|value| self.js_value(value))
                 .ok_or_else(|| JsError::Fault(HostFault::new("list index out of range"))),
-            Some(crate::runtime::HostSlot::Js(_)) => Err(JsError::Fault(HostFault::new(
-                "slot is a single JavaScript value",
-            ))),
+            Some(crate::runtime::HostSlot::Js(_) | crate::runtime::HostSlot::JsWeak(_)) => Err(
+                JsError::Fault(HostFault::new("slot is a single JavaScript value")),
+            ),
             None => Err(JsError::Fault(HostFault::new("slot index out of range"))),
         }
     }
@@ -1310,9 +1369,9 @@ impl<'a> CallCx<'a> {
                 values.push(value);
                 Ok(())
             }
-            Some(crate::runtime::HostSlot::Js(_)) => Err(JsError::Fault(HostFault::new(
-                "slot is a single JavaScript value",
-            ))),
+            Some(crate::runtime::HostSlot::Js(_) | crate::runtime::HostSlot::JsWeak(_)) => Err(
+                JsError::Fault(HostFault::new("slot is a single JavaScript value")),
+            ),
             None => Err(JsError::Fault(HostFault::new("slot index out of range"))),
         }
     }
@@ -1328,9 +1387,9 @@ impl<'a> CallCx<'a> {
                 values.clear();
                 Ok(())
             }
-            Some(crate::runtime::HostSlot::Js(_)) => Err(JsError::Fault(HostFault::new(
-                "slot is a single JavaScript value",
-            ))),
+            Some(crate::runtime::HostSlot::Js(_) | crate::runtime::HostSlot::JsWeak(_)) => Err(
+                JsError::Fault(HostFault::new("slot is a single JavaScript value")),
+            ),
             None => Err(JsError::Fault(HostFault::new("slot index out of range"))),
         }
     }

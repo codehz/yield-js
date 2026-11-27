@@ -1119,9 +1119,15 @@ pub(super) fn module_exports(args: TokenStream, item: TokenStream) -> Result<Tok
     })
 }
 
+pub(super) enum SlotKind {
+    Value,
+    List,
+    Weak,
+}
+
 pub(super) struct Slot {
     pub name: Ident,
-    pub list: bool,
+    pub kind: SlotKind,
 }
 
 // Only reject handle types that are visible in the field's type syntax. This
@@ -1171,7 +1177,9 @@ pub(super) fn extract_slots(item: &mut ItemStruct) -> Result<Vec<Slot>> {
         Fields::Unit => return Ok(slots),
     };
     for mut field in std::mem::take(fields) {
-        if let Some((kind, attr)) = take_marker(&mut field.attrs, &["js_slot", "js_list"])? {
+        if let Some((kind, attr)) =
+            take_marker(&mut field.attrs, &["js_slot", "js_list", "js_weak"])?
+        {
             if !matches!(attr.meta, Meta::Path(_)) {
                 return Err(Error::new_spanned(attr, "slot attributes take no options"));
             }
@@ -1184,20 +1192,36 @@ pub(super) fn extract_slots(item: &mut ItemStruct) -> Result<Vec<Slot>> {
             if !names.insert(plain_ident(&name)) {
                 return Err(Error::new_spanned(name, "duplicate slot name"));
             }
-            let list = kind == "js_list";
-            if list && !wrapped(&field.ty, "Vec").is_some_and(|ty| simple(ty, "JsValue")) {
-                return Err(Error::new_spanned(
-                    field.ty,
-                    "js_list field must be Vec<JsValue>",
-                ));
-            }
-            if !list && !simple(&field.ty, "JsValue") {
-                return Err(Error::new_spanned(
-                    field.ty,
-                    "js_slot field must be JsValue",
-                ));
-            }
-            slots.push(Slot { name, list });
+            let kind = match kind.as_str() {
+                "js_list" => {
+                    if !wrapped(&field.ty, "Vec").is_some_and(|ty| simple(ty, "JsValue")) {
+                        return Err(Error::new_spanned(
+                            field.ty,
+                            "js_list field must be Vec<JsValue>",
+                        ));
+                    }
+                    SlotKind::List
+                }
+                "js_weak" => {
+                    if !simple(&field.ty, "JsValue") {
+                        return Err(Error::new_spanned(
+                            field.ty,
+                            "js_weak field must be JsValue",
+                        ));
+                    }
+                    SlotKind::Weak
+                }
+                _ => {
+                    if !simple(&field.ty, "JsValue") {
+                        return Err(Error::new_spanned(
+                            field.ty,
+                            "js_slot field must be JsValue",
+                        ));
+                    }
+                    SlotKind::Value
+                }
+            };
+            slots.push(Slot { name, kind });
         } else {
             if contains_handle(&field.ty) {
                 return Err(Error::new_spanned(
@@ -1218,7 +1242,11 @@ pub(super) fn extract_slots(item: &mut ItemStruct) -> Result<Vec<Slot>> {
 pub(super) fn slot_decls(slots: &[Slot]) -> TokenStream {
     let declarations = slots.iter().map(|slot| {
         let name = plain_ident(&slot.name);
-        let kind = if slot.list { quote!(JsList) } else { quote!(Js) };
+        let kind = match slot.kind {
+            SlotKind::List => quote!(JsList),
+            SlotKind::Weak => quote!(JsWeak),
+            SlotKind::Value => quote!(Js),
+        };
         quote!(::yield_vm::binding::SlotDecl { name: #name, kind: ::yield_vm::binding::SlotKind::#kind })
     });
     quote!(&[#(#declarations),*])
@@ -1263,7 +1291,7 @@ fn slot_trait(item: &ItemStruct, slots: &[Slot]) -> Result<TokenStream> {
             Ok(())
         };
         let value = quote!(::yield_vm::JsValue);
-        if slot.list {
+        if matches!(slot.kind, SlotKind::List) {
             add(
                 format_ident!("{}_len", name),
                 format_ident!("list_len"),
@@ -1417,7 +1445,9 @@ pub(super) fn host_class(args: TokenStream, item: TokenStream) -> Result<TokenSt
         let name = plain_ident(field);
         let index = slots
             .iter()
-            .position(|slot| !slot.list && plain_ident(&slot.name) == name)
+            .position(|slot| {
+                matches!(slot.kind, SlotKind::Value) && plain_ident(&slot.name) == name
+            })
             .ok_or_else(|| {
                 Error::new_spanned(field, "event parent must name an own `js_slot` field")
             })?;
@@ -2644,6 +2674,18 @@ mod tests {
                 quote!(tag = "C"),
                 quote!(
                     struct C {
+                        #[js_weak]
+                        field: Vec<JsValue>,
+                    }
+                ),
+            ),
+            "js_weak field must be JsValue",
+        );
+        diagnostic(
+            host_class(
+                quote!(tag = "C"),
+                quote!(
+                    struct C {
                         #[js_slot]
                         field: JsValue,
                         #[js_slot]
@@ -2745,15 +2787,27 @@ mod tests {
                 #[js_list] queue: Vec<JsValue>,
                 payload: u32,
                 #[js_slot] value: JsValue,
+                #[js_weak] held: JsValue,
             }
         };
         let slots = extract_slots(&mut item).unwrap();
         assert_eq!(
             slots
                 .iter()
-                .map(|slot| (slot.name.to_string(), slot.list))
+                .map(|slot| (
+                    slot.name.to_string(),
+                    match slot.kind {
+                        SlotKind::List => "list",
+                        SlotKind::Value => "value",
+                        SlotKind::Weak => "weak",
+                    }
+                ))
                 .collect::<Vec<_>>(),
-            [("queue".to_owned(), true), ("value".to_owned(), false)]
+            [
+                ("queue".to_owned(), "list"),
+                ("value".to_owned(), "value"),
+                ("held".to_owned(), "weak")
+            ]
         );
         let Fields::Named(fields) = item.fields else {
             panic!("expected payload fields")

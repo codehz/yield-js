@@ -25,6 +25,10 @@ declare module "test" {
     export function reissue(label: unknown): Promise<unknown>;
     /** Allocates a host Node instance carrying `label`. */
     export function bind(label: unknown): unknown;
+    /** Reads the test module weak slot. */
+    export function getHostWeak(): unknown;
+    /** Writes the test module weak slot. */
+    export function setHostWeak(value: unknown): void;
     /** Records a label write on a host node. */
     export function setLabel(node?: unknown, label?: unknown): void;
     /** Allocates a host Matcher instance for `actual`. */

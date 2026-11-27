@@ -224,6 +224,12 @@ impl VmCore {
         }
         self.host_instances
             .retain(|id, _| live.objects.contains(id));
+        for instance in self.host_instances.values_mut() {
+            prune_weak_slots(&mut instance.slots, &live);
+        }
+        for state in &mut self.module_states {
+            prune_weak_slots(&mut state.slots, &live);
+        }
         self.continuations
             .retain(|id, _| live.continuations_seen.contains(id));
         Ok(removed)
@@ -429,6 +435,16 @@ pub(crate) fn pending_finalization_ids<'a>(
         .collect()
 }
 
+fn prune_weak_slots(slots: &mut [HostSlot], live: &LiveSet) {
+    for slot in slots {
+        if let HostSlot::JsWeak(Some(key)) = slot
+            && !live.contains_weak_key(*key)
+        {
+            *slot = HostSlot::JsWeak(None);
+        }
+    }
+}
+
 pub(crate) struct Tracer<'a> {
     heap: &'a Heap,
     continuations: &'a BTreeMap<ContinuationId, Continuation>,
@@ -501,6 +517,7 @@ impl<'a> Tracer<'a> {
                     self.mark_value(value)?;
                 }
             }
+            HostSlot::JsWeak(_) => {}
         }
         Ok(())
     }

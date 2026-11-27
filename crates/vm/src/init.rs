@@ -421,6 +421,7 @@ impl VmCore {
                         crate::binding::SlotKind::JsList => {
                             crate::runtime::HostSlot::JsList(Vec::new())
                         }
+                        crate::binding::SlotKind::JsWeak => crate::runtime::HostSlot::JsWeak(None),
                     })
                     .collect();
                 crate::runtime::ModuleState {

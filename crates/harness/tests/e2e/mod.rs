@@ -14,6 +14,7 @@ mod fetch_network;
 mod generator;
 mod globals;
 mod host_tasks;
+mod host_weak_slot;
 mod liveness;
 mod module_graph;
 mod objects;

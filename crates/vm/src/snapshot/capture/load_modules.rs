@@ -2,12 +2,13 @@
 
 use std::collections::BTreeMap;
 
-use crate::binding::Bindings;
+use crate::binding::{Bindings, SlotKind};
 use crate::error::VmError;
 use crate::heap::{EnvRole, Heap, Object};
 use crate::runtime::{HostInstance, HostSlot, ModuleState};
 use crate::value::{ObjectId, Value, ValueRef};
 
+use super::validate_builtins::validate_weak_key;
 use crate::snapshot::record::*;
 
 pub(super) fn load_host_classes(
@@ -95,27 +96,13 @@ pub(super) fn load_host_instances(
         }
         let mut slots = Vec::with_capacity(record.slots.len());
         for (slot, declaration) in record.slots.iter().zip(expected_slots) {
-            let slot = match (slot, declaration.kind) {
-                (HostSlotRecord::Js(value), crate::binding::SlotKind::Js) => {
-                    HostSlot::Js(value.clone())
-                }
-                (HostSlotRecord::JsList(values), crate::binding::SlotKind::JsList) => {
-                    HostSlot::JsList(values.clone())
-                }
-                _ => {
-                    return Err(VmError::InvalidSnapshot(format!(
-                        "class {} slot {:?} kind mismatch",
-                        record.class, declaration.name
-                    )));
-                }
-            };
-            for value in match &slot {
-                HostSlot::Js(value) => std::slice::from_ref(value),
-                HostSlot::JsList(values) => values.as_slice(),
-            } {
-                require_value_objects(heap, std::iter::once(value))?;
-            }
-            slots.push(slot);
+            slots.push(load_host_slot(
+                slot,
+                declaration.kind,
+                heap,
+                &format!("class {} slot {:?}", record.class, declaration.name),
+                record.object,
+            )?);
         }
         let payload = if bindings.class_has_payload_codec(class) {
             let payload = record.payload.as_ref().ok_or_else(|| {
@@ -185,27 +172,13 @@ pub(super) fn load_module_states(
         }
         let mut slots = Vec::with_capacity(record.slots.len());
         for (slot, declaration) in record.slots.iter().zip(expected_slots) {
-            let slot = match (slot, declaration.kind) {
-                (HostSlotRecord::Js(value), crate::binding::SlotKind::Js) => {
-                    HostSlot::Js(value.clone())
-                }
-                (HostSlotRecord::JsList(values), crate::binding::SlotKind::JsList) => {
-                    HostSlot::JsList(values.clone())
-                }
-                _ => {
-                    return Err(VmError::InvalidSnapshot(format!(
-                        "module {name} state slot {:?} kind mismatch",
-                        declaration.name
-                    )));
-                }
-            };
-            for value in match &slot {
-                HostSlot::Js(value) => std::slice::from_ref(value),
-                HostSlot::JsList(values) => values.as_slice(),
-            } {
-                require_value_objects(heap, std::iter::once(value))?;
-            }
-            slots.push(slot);
+            slots.push(load_host_slot(
+                slot,
+                declaration.kind,
+                heap,
+                &format!("module {name} state slot {:?}", declaration.name),
+                0,
+            )?);
         }
         let payload = bindings
             .state_decode(module, &record.bytes)
@@ -264,4 +237,32 @@ pub(super) fn require_value_objects<'a>(
         }
     }
     Ok(())
+}
+
+fn load_host_slot(
+    slot: &HostSlotRecord,
+    kind: SlotKind,
+    heap: &Heap,
+    owner: &str,
+    id: ObjectId,
+) -> Result<HostSlot, VmError> {
+    let slot = match (slot, kind) {
+        (HostSlotRecord::Js(value), SlotKind::Js) => HostSlot::Js(value.clone()),
+        (HostSlotRecord::JsList(values), SlotKind::JsList) => HostSlot::JsList(values.clone()),
+        (HostSlotRecord::JsWeak(key), SlotKind::JsWeak) => {
+            if let Some(key) = key {
+                validate_weak_key(heap, owner, id, *key)?;
+            }
+            HostSlot::JsWeak(*key)
+        }
+        _ => {
+            return Err(VmError::InvalidSnapshot(format!("{owner} kind mismatch")));
+        }
+    };
+    match &slot {
+        HostSlot::Js(value) => require_value_objects(heap, std::iter::once(value))?,
+        HostSlot::JsList(values) => require_value_objects(heap, values)?,
+        HostSlot::JsWeak(_) => {}
+    }
+    Ok(slot)
 }

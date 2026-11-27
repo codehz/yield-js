@@ -67,7 +67,7 @@ Node 扩展名加载器只接收 UTF-8 文本，不支持直接加载二进制�
 
 1. **代理不转发私元素或宿主隐藏槽。** 13 种 trap 覆盖对应内部方法；保存和恢复直接处理记录，不通过 trap 枚举。
 2. **新的堆种类仍要改可达性**。常规强边由 `Heap::write_edges` 提供；宿主实例的隐藏槽和模块状态槽由 GC 和快照共享的追踪器显式遍历，`WeakMap` 条目由 ephemeron 追踪单独处理，`WeakSet` 成员不参与标记。快照布局变化调整 `SNAPSHOT_FORMAT_VERSION`；仅执行语义变化可更新构建摘要的语义修订号来拒绝旧快照，不必因此调整 `BYTECODE_VERSION`。
-3. **宿主绑定首版仍有未决项。** 尚未实现弱引用槽、`JsMap` 槽、C ABI、TypeScript 定义生成、payload 流式/资源上限和跨线程交付。非空模块需显式选择初始化及 codec；可为普通 Rust 字段派生 `Encode` / `Decode`。宿主异常可继承 `yield_vm::intrinsics` 提供的异常类，不接受任意内建构造器。宿主绑定与脚本继承的已支持范围见 [`implemented.md`](implemented.md)。
+3. **宿主绑定首版仍有未决项。** 尚未实现 `JsMap` 槽、C ABI、TypeScript 定义生成、payload 流式/资源上限和跨线程交付。非空模块需显式选择初始化及 codec；可为普通 Rust 字段派生 `Encode` / `Decode`。宿主异常可继承 `yield_vm::intrinsics` 提供的异常类，不接受任意内建构造器。宿主绑定与脚本继承的已支持范围见 [`implemented.md`](implemented.md)。
    宿主模块的类、operation 与必需服务类型必须显式列出，不从导出签名或函数体推断；清单也覆盖继承、间接调用及恢复路径。自定义服务的必需依赖在编译期检查；可选服务不列入依赖，由调用方处理缺失。
    绑定指纹不检查保留 `.length` 的参数解码变化；恢复兼容不意味着宿主调用行为不变。
 4. **宿主续体不能等待任意 Rust Future。** `loop` / `while` / `while let` 的循环体可挂起；`while` / `while let` 的条件和 `for` 循环不能挂起。Guest 调用与 GC 同步恢复；只有正在等待外部 operation 的宿主任务可写入快照。Rust 栈、函数指针和 `ModuleCx` 不序列化；模块续体只在分派时重获本模块的状态能力。

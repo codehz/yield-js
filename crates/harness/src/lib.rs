@@ -65,6 +65,8 @@ impl NodeFactory {
 #[derive(Encode)]
 pub struct Node {
     pub label: String,
+    #[js_weak]
+    held: JsValue,
 }
 
 #[methods(Node)]
@@ -73,6 +75,16 @@ impl Node {
     fn label(cx: &mut CallCx<'_>, this: This<Node>) -> JsResult<JsValue> {
         let label = this.instance().payload(cx)?.label.clone();
         Ok(JsValue::string(label))
+    }
+
+    #[method(name = "getWeak")]
+    fn get_weak(cx: &mut CallCx<'_>, this: This<Node>) -> JsResult<JsValue> {
+        this.held(cx)
+    }
+
+    #[method(name = "setWeak")]
+    fn set_weak(cx: &mut CallCx<'_>, this: This<Node>, value: JsValue) -> JsResult<()> {
+        this.set_held(cx, value)
     }
 
     #[method(symbol = ToPrimitive)]
@@ -885,7 +897,10 @@ fn sync_call_result(
     operations = [Wait, Pause, Reject, Reissue, Timer],
     services = [counters: Rc<Counters>],
 )]
-struct TestModule;
+struct TestModule {
+    #[js_weak]
+    held: JsValue,
+}
 
 #[module_exports]
 impl TestModule {
@@ -1096,6 +1111,16 @@ impl TestModule {
             .to_utf8()
             .map_err(|_| throw_type_error(cx, "bind requires a valid UTF-16 label"))?;
         cx.alloc(Node { label })
+    }
+
+    #[function(name = "getHostWeak")]
+    fn get_host_weak(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<JsValue> {
+        cx.state_slot(Self::SLOT_HELD)
+    }
+
+    #[function(name = "setHostWeak")]
+    fn set_host_weak(cx: &mut yield_vm::ModuleCx<'_, Self>, value: JsValue) -> JsResult<()> {
+        cx.set_state_slot(Self::SLOT_HELD, value)
     }
 
     #[function(name = "setLabel")]

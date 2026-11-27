@@ -9,7 +9,7 @@ use crate::bytecode::BYTECODE_VERSION;
 use crate::heap::{CombineState, GeneratorObject, Object, WeakKey};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 97;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 98;
 
 /// Version for the binary envelope and bincode options, not the snapshot record layout.
 pub const SNAPSHOT_BINARY_VERSION: u32 = 1;
@@ -202,6 +202,7 @@ pub struct HostTaskRecord {
 pub enum HostSlotRecord {
     Js(Value),
     JsList(Vec<Value>),
+    JsWeak(Option<WeakKey>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

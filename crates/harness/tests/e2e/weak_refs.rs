@@ -13,13 +13,13 @@ fn full() -> RestoreOptions {
     }
 }
 
-fn restore(host: &TestHost, artifact: yield_vm::Build, snapshot: Snapshot) -> TestVm {
+pub(super) fn restore(host: &TestHost, artifact: yield_vm::Build, snapshot: Snapshot) -> TestVm {
     let mut vm = Vm::restore(snapshot, artifact, host.host(), Default::default()).unwrap();
     vm.start_recovered_operations().unwrap();
     vm
 }
 
-fn restore_full(
+pub(super) fn restore_full(
     host: &TestHost,
     artifact: yield_vm::Build,
     snapshot: Snapshot,
@@ -309,7 +309,7 @@ fn weak_refs_full_restore_rejects_corrupt_weak_state() {
     ));
 }
 
-fn round_trip(snapshot: &Snapshot) -> [Snapshot; 2] {
+pub(super) fn round_trip(snapshot: &Snapshot) -> [Snapshot; 2] {
     [
         json_round_trip(snapshot),
         Snapshot::from_bytes(&snapshot.to_bytes().unwrap()).unwrap(),

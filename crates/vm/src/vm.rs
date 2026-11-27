@@ -514,7 +514,9 @@ impl<P: PlatformServices> Vm<P> {
                 }
                 match instance.slots.get(slot)? {
                     crate::runtime::HostSlot::Js(value) => Some((object, value)),
-                    crate::runtime::HostSlot::JsList(_) => None,
+                    crate::runtime::HostSlot::JsList(_) | crate::runtime::HostSlot::JsWeak(_) => {
+                        None
+                    }
                 }
             })
     }

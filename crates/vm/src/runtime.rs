@@ -12,7 +12,7 @@ use crate::bytecode::Slot;
 use crate::error::VmError;
 use crate::frame::Frame;
 use crate::gc::{TraceRoots, Tracer};
-use crate::heap::PromiseState;
+use crate::heap::{PromiseState, WeakKey};
 use crate::snapshot::DeliveryTarget;
 use crate::value::{ContinuationId, ObjectId, Value};
 
@@ -66,6 +66,7 @@ impl VmClock {
 pub(crate) enum HostSlot {
     Js(Value),
     JsList(Vec<Value>),
+    JsWeak(Option<WeakKey>),
 }
 
 pub(crate) struct HostInstance {

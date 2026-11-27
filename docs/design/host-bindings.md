@@ -104,7 +104,7 @@ impl Matcher {
 
 - **标签**：稳定字符串或宏生成的 ID，出现在快照与诊断中，不出现在 JS。
 - **父类**：可选的父类标签。声明层把原型链接到父类原型，并把父类槽排在子类槽之前；基类方法与访问器接收派生实例，子类声明的槽索引按自身布局计数。
-- **槽布局**：有序、带名字、带种类。首版槽种类只有 `Js`（单个 `JsValue`）与 `JsList`（有序 `JsValue` 列表）。`JsList` 用于事件监听器集合这类「数量可变、元素是 JS 值」的状态，避免把引用塞进 payload。是否需要 `JsMap`、弱引用槽见[未决问题](#15-未决问题)。
+- **槽布局**：有序、带名字、带种类。槽种类为 `Js`（单个 `JsValue`）、`JsList`（有序 `JsValue` 列表）与 `JsWeak`（弱引用身份）。`JsList` 用于事件监听器集合这类「数量可变、元素是 JS 值」的状态，避免把引用塞进 payload。`JsWeak` 只保活槽本身，不保活目标，也不作为快照强根。`JsMap` 见[已决策事项](#15-已决策事项)。
 - **payload**：可选的 `T` 及其 codec。`T` 不得包含 `JsValue`。payload 属于具体实例类，不沿继承链合并。
 - **原型成员**：方法、访问器。成员名区分字符串与符号；`Symbol.iterator` 这类内建符号由稳定的枚举（`WellKnownSymbol`）在声明期内静态给出，不接受运行期 Symbol。`Symbol.dispose` / `Symbol.asyncDispose`（显式资源管理，见 [`language.md`](language.md)）同样按枚举声明；`asyncDispose` 需要异步收尾时以 `cx.promise(op)` 起始 operation，沿用现有挂起/恢复契约。
 - **可选构造器**：只有声明了 `Constructor` 的类才导出可 `new` 的函数。未声明时，类只作为返回类型和原型存在。
@@ -487,7 +487,7 @@ flowchart TB
 
 以下策略作为后续实现基线。它们是设计决策，不代表对应能力已经实现；若与当前代码不一致，以「首版落地状态」中的实现说明为准。
 
-1. **弱引用槽与 `JsMap` 槽：暂不增加。** 宿主实例槽维持 `Js` / `JsList`；弱键缓存使用 VM 已有的 `WeakMap`。出现具体绑定需求后再评估是否扩展槽种类。
+1. **`JsMap` 槽：暂不增加。** 弱引用槽已落地为 `JsWeak`；宿主实例槽维持 `Js` / `JsList` / `JsWeak`。映射容器仍使用 VM 已有的 `WeakMap` / `Map`，出现具体绑定需求后再评估是否扩展槽种类。
 2. **访问器失败时机：延迟到脚本访问。** 恢复只做结构和声明校验，不执行 getter/setter 或其他脚本可观察逻辑。
 3. **绑定类继承：允许 `class extends` 并调用 `super`。** 声明层父类支持原型链、槽合并和基类接收者校验。脚本派生构造复用基类构造及槽初始化，只对本次匹配的宿主分配使用派生原型，不改写替换对象的原型。脚本私元素单独存储，不增加 `HostClass` 槽或 payload。
 4. **符号成员：支持显式列出的 well-known Symbol。** 声明使用稳定的符号枚举 ID，不接受任意运行期 Symbol；宿主私有状态仍走隐藏槽，不映射为 JS 私有名。
@@ -502,13 +502,13 @@ flowchart TB
 
 ## 16. 首版落地状态
 
-已落地：类型化宏声明与签名指纹；VM 自有原型、方法共享、接收者校验、访问器；字符串与 well-known Symbol 成员名（`MemberName` / `WellKnownSymbol`）；绑定类父类声明的原型链、槽合并、基类接收者校验与快照往返；实例隐藏槽（`Js` / `JsList`）、payload codec 与服务；类实例身份与普通自有属性；`JsValue` 句柄的代际/调用校验；模块状态槽与 payload；operation 的 `Pause` / `Resume` / `Reissue` / `Reject` 策略、代际令牌；恢复只做 `Pause` / `Reject` 结算，`Resume` / `Reissue` 在任何外部工作前保持 pending，并在 `Vm::restore` 返回后由 `Vm::start_recovered_operations` 重新登记（启动失败结算该 operation）；快照只保存可达实例，恢复前原子校验绑定指纹、槽布局与 operation 声明。
+已落地：类型化宏声明与签名指纹；VM 自有原型、方法共享、接收者校验、访问器；字符串与 well-known Symbol 成员名（`MemberName` / `WellKnownSymbol`）；绑定类父类声明的原型链、槽合并、基类接收者校验与快照往返；实例隐藏槽（`Js` / `JsList` / `JsWeak`）、payload codec 与服务；类实例身份与普通自有属性；`JsValue` 句柄的代际/调用校验；模块状态槽与 payload；operation 的 `Pause` / `Resume` / `Reissue` / `Reject` 策略、代际令牌；恢复只做 `Pause` / `Reject` 结算，`Resume` / `Reissue` 在任何外部工作前保持 pending，并在 `Vm::restore` 返回后由 `Vm::start_recovered_operations` 重新登记（启动失败结算该 operation）；快照只保存可达实例，恢复前原子校验绑定指纹、槽布局与 operation 声明。
 
-脚本 `class` / `extends` / `super` 已支持：脚本派生实例的原型、宿主槽和 payload、脚本私元素均可跨快照恢复，恢复不再执行构造器或初始化器。BigInt 值域已落地：`JsValue::bigint` / `as_bigint`、`Inspect::bigint` 和 `InspectKind::BigInt`，并以规范十进制在构建与快照中往返。尚未实现：TypeScript 生成、C ABI、弱引用槽、`JsMap` 槽和流式 payload；恢复资源限制仅由可信本地快照这一前提约束。
+脚本 `class` / `extends` / `super` 已支持：脚本派生实例的原型、宿主槽和 payload、脚本私元素均可跨快照恢复，恢复不再执行构造器或初始化器。BigInt 值域已落地：`JsValue::bigint` / `as_bigint`、`Inspect::bigint` 和 `InspectKind::BigInt`，并以规范十进制在构建与快照中往返。尚未实现：TypeScript 生成、C ABI、`JsMap` 槽和流式 payload；恢复资源限制仅由可信本地快照这一前提约束。
 
 Rust 回调从 `&mut CallCx<'_>` 或对应的模块、类上下文开始，类成员接着接收 `This<Class>`。JS 形参依次是必需的 `JsValue`、可选的 `Option<JsValue>`（省略为 `None`，显式 `undefined` 为 `Some`），以及至多一个末尾的 `&[JsValue]`。切片借用当前同步阶段的实参句柄：从全部固定位置之后取值，不展开数组，不跨挂起保存。未声明 rest 时忽略多余实参。固定位置数（含可选位置）决定声明的 `.length`；指纹只记录这个参数数量，不区分必需与可选，也不记录 rest。返回类型是 `JsResult<JsValue>`、`JsResult<()>` 或 `JsResult<Instance<T>>`；CPS 入口使用 `JsResult<HostStep>`。VM 内部调用协议不变；不匹配的绑定指纹按 `InvalidSnapshot` 拒绝，不迁移也不启动恢复工作。
 
-宏展开引用 `::yield_vm`；如果依赖在 Cargo 中改名，在消费 crate 根用 `extern crate <依赖名> as yield_vm;` 提供该名字。`#[js_slot]` / `#[js_list]` 字段不进入 Rust payload；类用生成的 `<Class>Slots` trait 访问槽，模块状态用 `SLOT_<字段大写>` 索引。如果槽方法名被 `Instance` 的固有方法遮蔽，可用 `<Class>Slots::槽方法(&instance, cx)`。
+宏展开引用 `::yield_vm`；如果依赖在 Cargo 中改名，在消费 crate 根用 `extern crate <依赖名> as yield_vm;` 提供该名字。`#[js_slot]` / `#[js_list]` / `#[js_weak]` 字段不进入 Rust payload；类用生成的 `<Class>Slots` trait 访问槽，模块状态用 `SLOT_<字段大写>` 索引。如果槽方法名被 `Instance` 的固有方法遮蔽，可用 `<Class>Slots::槽方法(&instance, cx)`。
 
 `host!` 是受支持的注册入口，不提供公开 builder。`__macro_support` 只用于跨 crate 的宏展开，不是手写注册 API。
 
