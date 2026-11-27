@@ -46,7 +46,7 @@ Rust 宿主不支持运行时增删或替换服务，也不能声明可选依赖
 | `Math` | 浮点数学函数依赖 Rust `f64` 实现；`random` 使用固定种子的非加密 PRNG |
 | `RegExp` | 匹配语法取决于固定版本的 `regress`；支持 `d` / `g` / `i` / `m` / `s` / `u` / `v` / `y`（`u` 与 `v` 互斥）。不实现 Annex B 的 `compile` 和旧式静态匹配属性，不保证覆盖全部 Annex B 兼容语法。 |
 | `Map` / `Set` | 查找、删除与集合运算按活槽线性扫描，删除保留空槽 |
-| `Proxy` | 目标限于普通对象、数组、原始值包装对象、Date、DOMException、ArrayBuffer、TypedArray、DataView 及最终指向它们的代理；仅提供 `get` / `set` / `has` / `deleteProperty` / `ownKeys` / `getOwnPropertyDescriptor` 六种 trap。基线之外的代理特性见第 6 节 |
+| `Proxy` | 13 种内部方法 trap 均已提供（含 `apply` / `construct`）。目标可以是任意对象（含函数、构造器、宿主实例及最终指向它们的代理）；可调用性与可构造性在创建时从目标复制。私元素与宿主隐藏槽不走 trap；快照保存目标与 handler，不通过 trap 查询。已撤销代理的内部操作抛 `TypeError`。 |
 | `ArrayBuffer` / `DataView` / TypedArray | 缓冲区、11 种 `DataView` 宽度、12 个 TypedArray 构造器及其原型方法按 ES2026 实现，含可调整长度缓冲区与 base64/hex 编解码。`toLocaleString` 复用 `Number.prototype.toLocaleString` 与 `BigInt.prototype.toLocaleString`，没有 Intl 文本（与 `Number` / `BigInt` 的限制相同）。`SharedArrayBuffer`、`Atomics`、分离后重新附加不在范围内 |
 | `TextEncoder` / `TextDecoder` | `TextEncoder` 输出 UTF-8；`TextDecoder` 支持 UTF-8、UTF-16LE、UTF-16BE 及其标准标签。其他标签（如 `gbk`）按设计不支持，抛 `RangeError`。`TextEncoderStream` / `TextDecoderStream` 复用同一编码规则与增量状态。 |
 | Streams | 已提供排队策略、Readable/Writable/Transform、字节读取、pipe/tee、async iterator/`from`、文本转换流、流转移与压缩转换流。 |
@@ -65,7 +65,7 @@ Node 扩展名加载器只接收 UTF-8 文本，不支持直接加载二进制�
 
 ## 5. 结构性缺口
 
-1. **代理仅覆盖六种 trap**，不等同于完整 ECMAScript Proxy。
+1. **代理不转发私元素或宿主隐藏槽。** 13 种 trap 覆盖对应内部方法；保存和恢复直接处理记录，不通过 trap 枚举。
 2. **新的堆种类仍要改可达性**。常规强边由 `Heap::write_edges` 提供；宿主实例的隐藏槽和模块状态槽由 GC 和快照共享的追踪器显式遍历，`WeakMap` 条目由 ephemeron 追踪单独处理，`WeakSet` 成员不参与标记。快照布局变化调整 `SNAPSHOT_FORMAT_VERSION`；仅执行语义变化可更新构建摘要的语义修订号来拒绝旧快照，不必因此调整 `BYTECODE_VERSION`。
 3. **宿主绑定首版仍有未决项。** 尚未实现弱引用槽、`JsMap` 槽、C ABI、TypeScript 定义生成、payload 流式/资源上限和跨线程交付。非空模块需显式选择初始化及 codec；可为普通 Rust 字段派生 `Encode` / `Decode`。宿主异常可继承 `yield_vm::intrinsics` 提供的异常类，不接受任意内建构造器。宿主绑定与脚本继承的已支持范围见 [`implemented.md`](implemented.md)。
    宿主模块的类、operation 与必需服务类型必须显式列出，不从导出签名或函数体推断；清单也覆盖继承、间接调用及恢复路径。自定义服务的必需依赖在编译期检查；可选服务不列入依赖，由调用方处理缺失。
@@ -86,7 +86,6 @@ Node 扩展名加载器只接收 UTF-8 文本，不支持直接加载二进制�
 - `import.meta` 和导入/导出属性仍在编译期拒绝。跨模块读取有运行时 TDZ 检查，不改变普通函数的 TDZ 规则。
 - `debugger`：不在首版语法表
 - `WeakRef`、`FinalizationRegistry`、共享内存、`Atomics`
-- 代理函数/构造器，以及 design 未点名的其它 Proxy traps；`Proxy.revocable` 与 `new Proxy` 共享当前目标和 trap 限制。
 - 旧式 `Object.prototype.__proto__` 访问器；保留 `Object` / `Reflect` 的显式原型操作。
 - 快照迁移：恢复要求 `SNAPSHOT_FORMAT_VERSION`、`BYTECODE_VERSION`、`build_id` 和宿主绑定指纹均匹配；二进制镜像还要求当前 `SNAPSHOT_BINARY_VERSION`，不做容器迁移。
 - 产物迁移：`Build::from_bytes` 只接受当前 `BUILD_FORMAT_VERSION` 与当前 bincode 编码，不读取版本 1 的无资源容器或旧 JSON 产物。VM 不解析资源 URI 或内容，不加载或分派资源。
